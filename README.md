@@ -77,6 +77,30 @@
 
 ## 🚀 部署指南
 
+### 方式一：Vercel 部署（推荐）
+
+本项目已配置 Vercel 部署支持：
+
+1. 访问 [Vercel](https://vercel.com) 并使用 GitHub 登录
+2. 点击 "Add New..." → "Project"
+3. 导入仓库 `1837620622/sport-xiaomi`
+4. 直接点击 "Deploy" 即可
+5. 部署完成后访问：`https://sport-xiaomi-xxx.vercel.app`
+
+> ⚠️ **注意**：Vercel 无服务器环境下缓存功能受限
+
+### 方式二：宝塔面板部署（完整功能）
+
+```bash
+# 1. 在宝塔面板创建站点
+
+# 2. 进入站点目录，拉取代码
+git clone https://github.com/1837620622/sport-xiaomi.git .
+
+# 3. 设置 cache 目录权限
+chmod 777 cache/
+```
+
 ### Mac 系统部署
 
 #### 方式一：使用内置 PHP 服务器（推荐测试使用）
