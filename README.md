@@ -85,7 +85,11 @@
 2. 点击 "Add New..." → "Project"
 3. 导入仓库 `1837620622/sport-xiaomi`
 4. 直接点击 "Deploy" 即可
-5. 部署完成后访问：`https://sport-xiaomi-xxx.vercel.app`
+5. 部署完成后访问：https://sport-xiaomi.vercel.app
+
+### 🌐 在线演示
+
+**在线地址**：[https://sport-xiaomi.vercel.app](https://sport-xiaomi.vercel.app)
 
 > ⚠️ **注意**：Vercel 无服务器环境下缓存功能受限
 
