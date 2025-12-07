@@ -4,10 +4,13 @@
  * 使用方法（GET/POST均可）：
  * user  - 账号（手机号或邮箱）
  * pwd   - 密码
- * step  - 固定步数（必填）
+ * step  - 固定步数（必填，范围：1-98800）
  *
  * 示例：
- * curl "http://118.195.148.242:666//index.php?user=chuankangkk@163.com&pwd=WOzck20021223.&step=20000&token=666"
+ * curl "http://your-domain.com/index.php?user=your_account&pwd=your_password&step=20000&token=666"
+ * 
+ * 作者：传康KK
+ * 微信：1837620622
  */
 
 $token = "666";
@@ -49,6 +52,54 @@ function getSafeFilename($username) {
         $safeName = substr($safeName, 0, 100);
     }
     return $safeName;
+}
+
+// 验证步数范围（合理范围：1-98800，避免异常数据）
+function validateStep($step) {
+    $step = intval($step);
+    if ($step < 1) {
+        return [false, '步数不能小于1'];
+    }
+    if ($step > 98800) {
+        return [false, '步数不能超过98800（每日最大合理步数）'];
+    }
+    return [true, $step];
+}
+
+// 简单的请求频率限制（基于IP，每分钟最多10次请求）
+function checkRateLimit() {
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $rateLimitDir = __DIR__ . '/cache/rate_limit/';
+    
+    if (!is_dir($rateLimitDir)) {
+        mkdir($rateLimitDir, 0755, true);
+    }
+    
+    $rateLimitFile = $rateLimitDir . md5($ip) . '.txt';
+    $currentTime = time();
+    $windowSize = 60; // 60秒时间窗口
+    $maxRequests = 10; // 最大请求次数
+    
+    $requests = [];
+    if (file_exists($rateLimitFile)) {
+        $data = file_get_contents($rateLimitFile);
+        $requests = json_decode($data, true) ?: [];
+    }
+    
+    // 过滤掉过期的请求记录
+    $requests = array_filter($requests, function($timestamp) use ($currentTime, $windowSize) {
+        return ($currentTime - $timestamp) < $windowSize;
+    });
+    
+    if (count($requests) >= $maxRequests) {
+        return [false, '请求过于频繁，请稍后再试（每分钟最多' . $maxRequests . '次）'];
+    }
+    
+    // 添加当前请求时间戳
+    $requests[] = $currentTime;
+    file_put_contents($rateLimitFile, json_encode(array_values($requests)));
+    
+    return [true, ''];
 }
 
 class MiMotionRunner {
@@ -180,6 +231,7 @@ class MiMotionRunner {
         curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
         curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 30); // 总超时时间30秒
         curl_setopt($ch, CURLOPT_USERAGENT, 'MiFit6.14.0 (OPD2413; Android 15; Density/2.625)');
         curl_setopt($ch, CURLOPT_HEADER, 1);
         $ret = curl_exec($ch);
@@ -203,7 +255,10 @@ class MiMotionRunner {
         // 缓存不存在或已过期，从API获取
         $third_name = strpos($username, '@') === false ? 'huami_phone' : 'email';
         
-        if (!strpos($username, '@')) $username = '+86' . $username;
+        // 修复：使用 strpos !== false 正确判断是否包含 @
+        if (strpos($username, '@') === false) {
+            $username = '+86' . $username;
+        }
         $url = 'https://api-user.zepp.com/v2/registrations/tokens';
         $data = [
             'emailOrPhone' => $username,
@@ -236,6 +291,7 @@ class MiMotionRunner {
     public function login() {
         try {
             list($access, $third_name) = $this->getAccess($this->user, $this->password);
+            $this->logStr .= "获取access token成功\n";
             $url = 'https://account.zepp.com/v2/client/login';
             $data = [
                 'app_name' => 'com.xiaomi.hm.health',
@@ -265,15 +321,23 @@ class MiMotionRunner {
                 throw new Exception('登录失败' . $response['body']);
             }
         } catch (Exception $e) {
-            return [0, 0];
+            $this->logStr .= "登录异常：" . $e->getMessage() . "\n";
+            return [0, 0, $e->getMessage()];
         }
     }
 
     public function loginAndPostStep($step) {
         if ($this->invalid) return ["账号或密码配置有误", false];
         
-        list($token, $userid) = $this->login();
-        if (!$token) return ["登录失败！", false];
+        $loginResult = $this->login();
+        $token = $loginResult[0] ?? 0;
+        $userid = $loginResult[1] ?? 0;
+        $loginError = $loginResult[2] ?? '';
+        
+        if (!$token) {
+            $errorMsg = $loginError ? "登录失败：{$loginError}" : "登录失败！";
+            return [$errorMsg, false];
+        }
 
         try {
             $url = "https://api-mifit-cn.zepp.com/v1/data/band_data.json?&t=" . time();
@@ -1256,9 +1320,17 @@ user=13888888888&pwd=yourpassword&step=20000
 // ==================== 主执行逻辑 ====================
 // 处理 POST 请求（网页提交）
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    // 频率限制检查
+    list($rateLimitOk, $rateLimitMsg) = checkRateLimit();
+    if (!$rateLimitOk) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(["error" => $rateLimitMsg], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        exit;
+    }
+    
     $user = param('user');
     $pwd = param('pwd');
-    $step = intval(param('step'));
+    $step = param('step');
 
     if (!$user || !$pwd || !$step) {
         echo json_encode([
@@ -1266,6 +1338,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         exit;
     }
+    
+    // 步数验证
+    list($stepValid, $stepResult) = validateStep($step);
+    if (!$stepValid) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(["error" => $stepResult], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        exit;
+    }
+    $step = $stepResult;
 
     $runner = new MiMotionRunner($user, $pwd);
     list($msg, $success) = $runner->loginAndPostStep($step);
@@ -1285,7 +1366,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // 处理 GET 请求（API 调用，需要 token）
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['token'])) {
+    // 频率限制检查
+    list($rateLimitOk, $rateLimitMsg) = checkRateLimit();
+    if (!$rateLimitOk) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(["error" => $rateLimitMsg], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        exit;
+    }
+    
     if ($_GET['token'] !== $token) {
+        header('Content-Type: application/json; charset=utf-8');
         echo json_encode([
             "error" => "Token 验证失败"
         ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
@@ -1294,14 +1384,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['token'])) {
 
     $user = param('user');
     $pwd = param('pwd');
-    $step = intval(param('step'));
+    $step = param('step');
 
     if (!$user || !$pwd || !$step) {
+        header('Content-Type: application/json; charset=utf-8');
         echo json_encode([
             "error" => "参数不完整，必须提供 user, pwd, step"
         ], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
         exit;
     }
+    
+    // 步数验证
+    list($stepValid, $stepResult) = validateStep($step);
+    if (!$stepValid) {
+        header('Content-Type: application/json; charset=utf-8');
+        echo json_encode(["error" => $stepResult], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+        exit;
+    }
+    $step = $stepResult;
 
     $runner = new MiMotionRunner($user, $pwd);
     list($msg, $success) = $runner->loginAndPostStep($step);

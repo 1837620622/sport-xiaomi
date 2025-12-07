@@ -1,5 +1,6 @@
-# 缓存目录
+# 缓存目录（登录token缓存和频率限制）
 cache/
+cache/rate_limit/
 
 # 系统文件
 .DS_Store
