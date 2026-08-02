@@ -25,7 +25,12 @@ function jsonResponse($data, $code = 200) {
     http_response_code($code);
     header('Content-Type: application/json; charset=utf-8');
     header('Cache-Control: no-store, no-cache, must-revalidate');
-    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    // 输入含非法 UTF-8 时 json_encode 返回 false, 兜底输出避免空响应
+    if ($json === false) {
+        $json = json_encode(['error' => '响应编码失败'], JSON_UNESCAPED_UNICODE);
+    }
+    echo $json;
     exit;
 }
 
@@ -37,11 +42,32 @@ function cacheBaseDir() {
 // 同源校验: 判断请求是否来自本站页面(用于放行网页表单 POST, 阻止跨站伪造)
 function isSameOrigin() {
     $host = $_SERVER['HTTP_HOST'] ?? '';
-    $ref = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
-    if ($host === '' || $ref === '') {
+    $origin = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
+    if ($host === '' || $origin === '') {
         return false;
     }
-    return preg_match('#^https?://' . preg_quote($host, '#') . '($|[/:])#', $ref) === 1;
+    $parts = parse_url($origin);
+    if (!is_array($parts) || !isset($parts['scheme'], $parts['host'])) {
+        return false;
+    }
+    $scheme = strtolower($parts['scheme']);
+    if ($scheme !== 'http' && $scheme !== 'https') {
+        return false;
+    }
+    // 当前请求是否为 HTTPS(兼容反向代理)
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
+    // Origin 端口: 显式给定则用给定值, 否则按 scheme 默认
+    $originPort = isset($parts['port']) ? (int)$parts['port'] : ($scheme === 'https' ? 443 : 80);
+    // 请求 Host 拆出主机名与端口(端口缺省按当前 scheme 默认)
+    $reqHost = strtolower(preg_replace('/[^a-zA-Z0-9.\-:\[\]]/', '', $host));
+    $reqPort = $isHttps ? 443 : 80;
+    if (preg_match('#^(.*):(\d+)$#', $reqHost, $m)) {
+        $reqHost = $m[1];
+        $reqPort = (int)$m[2];
+    }
+    // 主机名与端口必须完全一致, 拒绝同域异端口(如 http://host:8080)的跨端口伪造
+    return $reqHost === strtolower($parts['host']) && $reqPort === $originPort;
 }
 
 // 自动识别当前页面基础地址(兼容反向代理下的 HTTPS)
@@ -75,7 +101,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && !isset($_GET['token']) && empty($_PO
 }
 
 function param($key, $default = '') {
-    return isset($_POST[$key]) ? trim($_POST[$key]) : (isset($_GET[$key]) ? trim($_GET[$key]) : $default);
+    // 防御数组参数(如 user[]=a), PHP 8 下 trim(array) 会抛 TypeError
+    $v = $_POST[$key] ?? $_GET[$key] ?? $default;
+    return is_string($v) ? trim($v) : $default;
 }
 
 // 脱敏账号
@@ -106,8 +134,9 @@ function resolveStep($step) {
         $max = 30000;
         return [true, mt_rand($min, $max), true];
     }
-    if (!is_numeric($step)) {
-        return [false, 'step 参数必须是数字或"随机数"', false];
+    // 必须是纯整数(拒绝 1.9、1e3 等会被 intval 截断的写法)
+    if (!preg_match('/^\d+$/', $step)) {
+        return [false, 'step 参数必须是整数或"随机数"', false];
     }
     $step = intval($step);
     if ($step < 1) {
@@ -139,14 +168,18 @@ function checkRateLimit() {
     if (!is_dir($rateLimitDir) || !is_writable($rateLimitDir)) {
         return [true, ''];
     }
-    // 随机抽样清理超过 24 小时的限频文件, 防止公网扫描产生海量小文件
-    if (mt_rand(1, 200) === 1) {
-        $files = glob($rateLimitDir . '*.txt');
-        if (is_array($files) && count($files) > 500) {
-            foreach ($files as $f) {
-                if (time() - @filemtime($f) > 86400) {
-                    @unlink($f);
-                }
+    // 随机抽样清理限频文件(含残留的 tmp 文件): 文件数超 200 且抽样命中时清理最旧的一半
+    // 不限定 mtime(持续刷新的文件也应回收), 防止公网扫描导致文件数无限增长
+    if (mt_rand(1, 20) === 1) {
+        $files = glob($rateLimitDir . '*.txt*');
+        if (is_array($files) && count($files) > 200) {
+            // 按修改时间升序, 删除最旧的一半
+            usort($files, function ($a, $b) {
+                return @filemtime($a) - @filemtime($b);
+            });
+            $removeCount = (int)(count($files) / 2);
+            for ($i = 0; $i < $removeCount; $i++) {
+                @unlink($files[$i]);
             }
         }
     }
@@ -353,12 +386,12 @@ class MiMotionRunner {
         $lockFp = @fopen($lockFile, 'c');
         $gotLock = false;
         if ($lockFp) {
-            for ($i = 0; $i < 200; $i++) {
+            for ($i = 0; $i < 75; $i++) { // 75 × 200ms = 最长等待 15 秒
                 if (flock($lockFp, LOCK_EX | LOCK_NB)) {
                     $gotLock = true;
                     break;
                 }
-                usleep(200000); // 最长等待 40 秒
+                usleep(200000); // 最长等待 15 秒(超过即放弃锁, 走最终缓存检查)
             }
         } else {
             // 锁文件无法创建(如只读文件系统): 降级为无锁直连登录, 仅可能多一次重复登录
@@ -494,7 +527,8 @@ $json = '[{"data_hr":"\/\/\/\/\/\/9L\/\/\/\/\/\/\/\/\/\/\/\/Vv\/\/\/\/\/\/\/\/\/
             } elseif (isset($arr['code']) && $arr['code'] == 1) {
                 return ["修改步数({$step})", true];
             } else {
-                $message = isset($arr['message']) ? $arr['message'] : $response['body'];
+                // 不回显上游原始响应体, 避免泄露上游内部错误结构
+                $message = isset($arr['message']) && is_string($arr['message']) ? $arr['message'] : '未知错误';
                 throw new Exception('修改步数失败: ' . $message);
             }
         } catch (Exception $e) {
@@ -1606,7 +1640,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' || isset($_GET['token']) || isset($_PO
     try {
         $runner = new MiMotionRunner($user, $pwd);
         list($msg, $success) = $runner->loginAndPostStep($stepResult);
-    } catch (Exception $e) {
+    } catch (\Throwable $e) {
+        // 捕获所有错误(含 TypeError/ValueError), 避免空响应 500
         jsonResponse(["error" => "服务器内部错误: " . $e->getMessage()], 500);
     }
 

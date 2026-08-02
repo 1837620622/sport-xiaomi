@@ -14,8 +14,8 @@
 
 <p align="center">
   <a href="https://sport-xiaomi.vercel.app">在线演示 (Vercel)</a> ·
-  <a href="http://118.195.148.242:666">在线演示 (独立服务器)</a> ·
-  <a href="http://118.195.148.242:666/?m=appinfo">API 文档</a>
+  <a href="http://101.43.83.185:666">在线演示 (独立服务器)</a> ·
+  <a href="http://101.43.83.185:666/?m=appinfo">API 文档</a>
 </p>
 
 ---
