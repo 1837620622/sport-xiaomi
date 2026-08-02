@@ -1459,9 +1459,9 @@ a { text-decoration: none; color: inherit; }
     <div class="doc-card">
         <div class="doc-head"><span class="pn">03</span><span class="ic"><i data-lucide="terminal" style="width:16px;height:16px"></i></span> 请求示例</div>
         <div class="doc-body">
-            <div class="code-block" id="code1"><span class="cm"># GET · 固定步数 (需带 token)</span><br><span class="cc">$</span> curl "<?php echo $base; ?>?user=13888888888&pwd=yourpassword&step=28000&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
+            <div class="code-block" id="code1"><span class="cm"># GET · 固定步数 (需带 token, 警告: GET 会把密码明文写入服务器访问日志, 公网部署请优先用 POST)</span><br><span class="cc">$</span> curl "<?php echo $base; ?>?user=13888888888&pwd=yourpassword&step=28000&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
             <button class="copy-btn" data-target="code1"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
-            <div class="code-block" id="code2"><span class="cm"># GET · 随机步数 18000~30000</span><br><span class="cc">$</span> curl "<?php echo $base; ?>?user=you@example.com&pwd=yourpassword&step=随机数&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
+            <div class="code-block" id="code2"><span class="cm"># GET · 随机步数 18000~30000 (密码同样会进访问日志, 请优先用 POST)</span><br><span class="cc">$</span> curl "<?php echo $base; ?>?user=you@example.com&pwd=yourpassword&step=随机数&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
             <button class="copy-btn" data-target="code2"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
             <div class="code-block" id="code3"><span class="cm"># POST · 表单提交, 推荐方式 (密码不进 URL)</span><br><span class="cc">$</span> curl -X POST "<?php echo $base; ?>" -d "user=you@example.com&pwd=yourpassword&step=28000&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
             <button class="copy-btn" data-target="code3"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>

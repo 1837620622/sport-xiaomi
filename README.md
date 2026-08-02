@@ -146,6 +146,8 @@ nohup php -S 0.0.0.0:666 > php666.log 2>&1 &
 
 ### GET 请求示例
 
+> ⚠️ 警告: GET 方式会把账号密码明文写入服务器访问日志(如 systemd journal), 公网部署请一律使用 POST 方式, GET 仅限本地测试。
+
 ```bash
 # 固定步数
 curl "http://your.domain/index.php?user=13888888888&pwd=yourpassword&step=28000&token=666"
