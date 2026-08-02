@@ -214,12 +214,16 @@ print(r.json())
 
 ```
 sport-xiaomi/
-├── index.php          # 唯一主程序 (网页界面 + API 后端 + 文档页)
+├── index.php          # 主程序 (网页界面 + API 后端 + 文档页, 独立服务器部署用)
+├── api/
+│   └── index.php      # Vercel 部署入口 (与根 index.php 内容同步, 由 vercel.json 指定)
 ├── cache/             # Token 缓存 / 频率限制 (运行时自动创建, 含 .htaccess 保护)
 ├── vercel.json        # Vercel 部署配置
 ├── .gitignore
 └── README.md
 ```
+
+> 维护提示: Vercel 的 Serverless 函数必须在 `api/` 目录下, 因此 `api/index.php` 是根 `index.php` 的部署副本, 修改主程序后请同步复制 (`cp index.php api/index.php`)。
 
 ---
 
