@@ -1,0 +1,8 @@
+# 保护缓存目录: 禁止直接下载缓存文件(含登录凭据)
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>
+<IfModule !mod_authz_core.c>
+    Order allow,deny
+    Deny from all
+</IfModule>

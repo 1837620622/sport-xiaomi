@@ -3,26 +3,73 @@
  * 小米运动(Zepp Life)刷步数引擎 - Zepp API 版
  *
  * 接口用法(GET / POST 均可):
- *   ?user=账号&pwd=密码&step=28000&token=666
- *   step 支持数字或"随机数"(自动生成 18000~30000 随机步数)
+ *   GET  ?user=账号&pwd=密码&step=28000&token=666
+ *   POST user=账号&pwd=密码&step=28000&token=666   (推荐, 密码不进 URL)
+ *   step 支持数字(1~98800)或"随机数"(自动生成 18000~30000 随机步数)
+ *
+ * 环境变量(可选):
+ *   STEP_TOKEN     覆盖默认 API 密钥(默认 "666")
+ *   STEP_CACHE_DIR 自定义缓存目录, 建议放在 Web 根目录之外防止缓存文件被直接下载
+ *   STEP_TRUST_PROXY=1  部署在可信反向代理后时, 限频读取 X-Forwarded-For 首个 IP
  *
  * 作者: 传康KK
  * 说明: 仅供个人学习研究, 修改后的步数自动同步微信/支付宝等已绑定平台
  */
 
-$token = "666";
+// API 密钥: 默认 666, 可通过环境变量 STEP_TOKEN 覆盖
+$token = trim(getenv('STEP_TOKEN')) ?: "666";
 date_default_timezone_set('Asia/Shanghai');
+
+// 统一 JSON 输出(带正确状态码与禁止缓存头)
+function jsonResponse($data, $code = 200) {
+    http_response_code($code);
+    header('Content-Type: application/json; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate');
+    echo json_encode($data, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
+    exit;
+}
+
+// 缓存目录: 优先使用环境变量 STEP_CACHE_DIR(建议部署到 Web 根目录之外, 防止缓存文件被直接下载)
+function cacheBaseDir() {
+    return getenv('STEP_CACHE_DIR') ?: __DIR__ . '/cache';
+}
+
+// 同源校验: 判断请求是否来自本站页面(用于放行网页表单 POST, 阻止跨站伪造)
+function isSameOrigin() {
+    $host = $_SERVER['HTTP_HOST'] ?? '';
+    $ref = $_SERVER['HTTP_ORIGIN'] ?? $_SERVER['HTTP_REFERER'] ?? '';
+    if ($host === '' || $ref === '') {
+        return false;
+    }
+    return preg_match('#^https?://' . preg_quote($host, '#') . '($|[/:])#', $ref) === 1;
+}
+
+// 自动识别当前页面基础地址(兼容反向代理下的 HTTPS)
+function baseUrl() {
+    $host = preg_replace('/[^a-zA-Z0-9.\-:\[\]]/', '', $_SERVER['HTTP_HOST'] ?? 'localhost');
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https')
+        || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
+    $scheme = $isHttps ? 'https' : 'http';
+    return $scheme . '://' . $host . ($_SERVER['SCRIPT_NAME'] ?? '/');
+}
 
 // ==================== 路由处理 ====================
 // 轻量自检接口(首页状态灯使用, 不消耗限频、不触发登录)
 if (isset($_GET['m']) && $_GET['m'] === 'ping') {
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode(['status' => 'ok', 'time' => date('Y-m-d H:i:s')]);
-    exit;
+    jsonResponse(['status' => 'ok', 'time' => date('Y-m-d H:i:s')]);
 }
-// 纯 GET 且无 token 参数 -> 显示网页界面
+// 纯 GET 且无 token 参数 -> 显示网页界面 / API 文档页
 if ($_SERVER['REQUEST_METHOD'] === 'GET' && !isset($_GET['token']) && empty($_POST)) {
-    showWebPage();
+    if (isset($_GET['m'])) {
+        if ($_GET['m'] === 'appinfo') {
+            showAppInfo();
+        } else {
+            jsonResponse(['error' => 'not found'], 404);
+        }
+    } else {
+        showWebPage();
+    }
 }
 
 function param($key, $default = '') {
@@ -71,31 +118,75 @@ function resolveStep($step) {
 }
 
 // 简单的请求频率限制(基于IP, 每分钟最多10次)
+// 读-改-写全程使用 flock 互斥锁, 防止多进程并发下计数丢失或文件损坏
 function checkRateLimit() {
+    // 默认按 REMOTE_ADDR 计频; 部署在可信反向代理后(如 Nginx), 设置 STEP_TRUST_PROXY=1 后读取 X-Forwarded-For 首个 IP
     $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
-    $rateLimitDir = __DIR__ . '/cache/rate_limit/';
+    if (getenv('STEP_TRUST_PROXY') === '1' && isset($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+        $xff = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR']);
+        $first = trim($xff[0]);
+        if ($first !== '') {
+            $ip = $first;
+        }
+    }
+    $rateLimitDir = cacheBaseDir() . '/rate_limit/';
     if (!is_dir($rateLimitDir)) {
-        mkdir($rateLimitDir, 0755, true);
+        @mkdir($rateLimitDir, 0755, true);
+    }
+    // 目录不可写(如 Vercel serverless)时降级放行, 不阻塞正常使用
+    if (!is_dir($rateLimitDir) || !is_writable($rateLimitDir)) {
+        return [true, ''];
+    }
+    // 随机抽样清理超过 24 小时的限频文件, 防止公网扫描产生海量小文件
+    if (mt_rand(1, 200) === 1) {
+        $files = glob($rateLimitDir . '*.txt');
+        if (is_array($files) && count($files) > 500) {
+            foreach ($files as $f) {
+                if (time() - @filemtime($f) > 86400) {
+                    @unlink($f);
+                }
+            }
+        }
     }
     $rateLimitFile = $rateLimitDir . md5($ip) . '.txt';
     $currentTime = time();
     $windowSize = 60;
     $maxRequests = 10;
 
-    $requests = [];
-    if (file_exists($rateLimitFile)) {
-        $data = file_get_contents($rateLimitFile);
-        $requests = json_decode($data, true) ?: [];
+    $lockFp = @fopen($rateLimitDir . '.lock', 'c');
+    if (!$lockFp) {
+        return [true, ''];
     }
-    $requests = array_filter($requests, function ($timestamp) use ($currentTime, $windowSize) {
-        return ($currentTime - $timestamp) < $windowSize;
-    });
-    if (count($requests) >= $maxRequests) {
-        return [false, '请求过于频繁, 请稍后再试(每分钟最多' . $maxRequests . '次)'];
+    $ok = true;
+    $msg = '';
+    if (flock($lockFp, LOCK_EX)) {
+        $requests = [];
+        if (file_exists($rateLimitFile)) {
+            $data = @file_get_contents($rateLimitFile);
+            $requests = json_decode((string)$data, true);
+            if (!is_array($requests)) {
+                $requests = [];
+            }
+        }
+        $requests = array_values(array_filter($requests, function ($timestamp) use ($currentTime, $windowSize) {
+            return is_numeric($timestamp) && ($currentTime - $timestamp) < $windowSize;
+        }));
+        if (count($requests) >= $maxRequests) {
+            $ok = false;
+            $msg = '请求过于频繁, 请稍后再试(每分钟最多' . $maxRequests . '次)';
+        } else {
+            $requests[] = $currentTime;
+            // 临时文件 + rename 原子写, 避免并发交错写损坏 JSON
+            $tmp = $rateLimitFile . '.tmp.' . uniqid('', true);
+            if (@file_put_contents($tmp, json_encode(array_values($requests))) !== false) {
+                @rename($tmp, $rateLimitFile);
+                @chmod($rateLimitFile, 0600);
+            }
+        }
+        flock($lockFp, LOCK_UN);
     }
-    $requests[] = $currentTime;
-    file_put_contents($rateLimitFile, json_encode(array_values($requests)));
-    return [true, ''];
+    fclose($lockFp);
+    return [$ok, $msg];
 }
 
 // ==================== 核心: MiMotionRunner ====================
@@ -104,7 +195,7 @@ class MiMotionRunner {
     private $password;
     public $logStr = "";
     public $invalid = false;
-    private $cacheDir = __DIR__ . '/cache/';
+    private $cacheDir;
     private $cacheFile;
 
     function __construct($user, $passwd) {
@@ -116,28 +207,28 @@ class MiMotionRunner {
         $this->user = $user;
         $this->password = $passwd;
 
+        $this->cacheDir = rtrim(cacheBaseDir(), '/') . '/';
         if (!is_dir($this->cacheDir)) {
-            mkdir($this->cacheDir, 0755, true);
+            @mkdir($this->cacheDir, 0755, true);
         }
         $this->cacheFile = $this->cacheDir . getSafeFilename($user) . '.txt';
     }
 
-    // 读取缓存
+    // 读取缓存(返回 null 表示无有效缓存)
     private function readCache() {
         if (!file_exists($this->cacheFile)) {
             return null;
         }
-        $fp = fopen($this->cacheFile, 'r');
+        $fp = @fopen($this->cacheFile, 'r');
         if (!$fp) {
             return null;
         }
         if (flock($fp, LOCK_SH)) {
-            $data = file_get_contents($this->cacheFile);
+            $data = stream_get_contents($fp);
             flock($fp, LOCK_UN);
             fclose($fp);
-            $cache = json_decode($data, true);
+            $cache = json_decode((string)$data, true);
             if (!$cache || !isset($cache['expire_time']) || $cache['expire_time'] < time()) {
-                $this->clearCache();
                 return null;
             }
             return $cache;
@@ -146,41 +237,55 @@ class MiMotionRunner {
         return null;
     }
 
-    // 写入缓存
-    private function writeCache($access, $third_name) {
+    // 校验缓存: 有效期内且密码哈希匹配才可复用(防止缓存期内密码被篡改仍可刷步)
+    private function getCachedAccess($password) {
+        $cache = $this->readCache();
+        if ($cache && isset($cache['access']) && isset($cache['third_name'])
+            && isset($cache['pwd_hash']) && password_verify($password, $cache['pwd_hash'])) {
+            return [$cache['access'], $cache['third_name']];
+        }
+        return null;
+    }
+
+    // 写入缓存(临时文件 + rename 原子写, 权限 0600)
+    private function writeCache($access, $third_name, $password) {
         $cacheData = [
             'access' => $access,
             'third_name' => $third_name,
             'user' => $this->user,
+            'pwd_hash' => password_hash($password, PASSWORD_DEFAULT),
             'create_time' => time(),
             'expire_time' => time() + 604800 // 7天
         ];
         $jsonData = json_encode($cacheData);
-        $tempFile = $this->cacheFile . '.tmp.' . uniqid();
-        $fp = fopen($tempFile, 'w');
+        if ($jsonData === false) {
+            return false;
+        }
+        $tempFile = $this->cacheFile . '.tmp.' . uniqid('', true);
+        $fp = @fopen($tempFile, 'w');
         if (!$fp) {
             return false;
         }
-        if (flock($fp, LOCK_EX)) {
-            fwrite($fp, $jsonData);
-            fflush($fp);
-            flock($fp, LOCK_UN);
+        if (fwrite($fp, $jsonData) !== strlen($jsonData)) {
+            // 写入长度不完整, 丢弃临时文件, 避免产生损坏缓存
             fclose($fp);
-            if (rename($tempFile, $this->cacheFile)) {
-                return true;
-            }
-            unlink($tempFile);
+            @unlink($tempFile);
             return false;
         }
+        fflush($fp);
         fclose($fp);
-        unlink($tempFile);
+        @chmod($tempFile, 0600);
+        if (@rename($tempFile, $this->cacheFile)) {
+            return true;
+        }
+        @unlink($tempFile);
         return false;
     }
 
     // 清除缓存
     private function clearCache() {
         if (file_exists($this->cacheFile)) {
-            unlink($this->cacheFile);
+            @unlink($this->cacheFile);
         }
     }
 
@@ -191,74 +296,126 @@ class MiMotionRunner {
         return openssl_encrypt($plain, 'AES-128-CBC', $key, OPENSSL_RAW_DATA, $iv);
     }
 
+    // 统一 HTTP 请求: 开启 SSL 证书校验、失败自动重试一次、带超时保护
     private function curl($url, $data = null, $app_token = null, $ekv = false) {
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        $httpheader[] = "Accept: application/json";
-        $httpheader[] = "Accept-Language: zh-CN,zh;q=0.8";
-        $httpheader[] = "Connection: keep-alive";
-        if ($ekv) $httpheader[] = "x-hm-ekv: 1";
-        $httpheader[] = "app_name: com.xiaomi.hm.health";
-        $httpheader[] = "appname: com.xiaomi.hm.health";
-        $httpheader[] = "appplatform: android_phone";
-        if ($app_token) {
-            $httpheader[] = "apptoken: " . $app_token;
+        $lastError = '';
+        for ($i = 0; $i < 2; $i++) {
+            $ch = curl_init();
+            $httpheader = [];
+            $httpheader[] = "Accept: application/json";
+            $httpheader[] = "Accept-Language: zh-CN,zh;q=0.8";
+            $httpheader[] = "Connection: keep-alive";
+            if ($ekv) $httpheader[] = "x-hm-ekv: 1";
+            $httpheader[] = "app_name: com.xiaomi.hm.health";
+            $httpheader[] = "appname: com.xiaomi.hm.health";
+            $httpheader[] = "appplatform: android_phone";
+            if ($app_token) {
+                $httpheader[] = "apptoken: " . $app_token;
+            }
+            curl_setopt($ch, CURLOPT_HTTPHEADER, $httpheader);
+            curl_setopt($ch, CURLOPT_URL, $url);
+            if ($data) {
+                if (is_array($data)) $data = http_build_query($data);
+                curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
+                curl_setopt($ch, CURLOPT_POST, 1);
+            }
+            curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+            curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, 2);
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 25);
+            curl_setopt($ch, CURLOPT_USERAGENT, 'MiFit6.14.0 (OPD2413; Android 15; Density/2.625)');
+            curl_setopt($ch, CURLOPT_HEADER, 1);
+            $ret = curl_exec($ch);
+            $lastError = curl_error($ch);
+            $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
+            curl_close($ch);
+            if ($ret !== false && is_int($headerSize) && $headerSize >= 0) {
+                $header = substr($ret, 0, $headerSize);
+                $body = substr($ret, $headerSize);
+                return ['header' => $header, 'body' => $body];
+            }
         }
-        curl_setopt($ch, CURLOPT_HTTPHEADER, $httpheader);
-        if ($data) {
-            if (is_array($data)) $data = http_build_query($data);
-            curl_setopt($ch, CURLOPT_POSTFIELDS, $data);
-            curl_setopt($ch, CURLOPT_POST, 1);
-        }
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYHOST, false);
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-        curl_setopt($ch, CURLOPT_USERAGENT, 'MiFit6.14.0 (OPD2413; Android 15; Density/2.625)');
-        curl_setopt($ch, CURLOPT_HEADER, 1);
-        $ret = curl_exec($ch);
-        $headerSize = curl_getinfo($ch, CURLINFO_HEADER_SIZE);
-        $header = substr($ret, 0, $headerSize);
-        $body = substr($ret, $headerSize);
-        curl_close($ch);
-        return ['header' => $header, 'body' => $body];
+        throw new Exception('网络请求失败: ' . ($lastError ?: '未知错误'));
     }
 
     private function getAccess($username, $password) {
-        // 优先使用缓存
-        $cache = $this->readCache();
-        if ($cache && isset($cache['access']) && isset($cache['third_name'])) {
-            return [$cache['access'], $cache['third_name']];
+        // 快路径: 缓存有效且密码匹配则直接复用, 免重复登录
+        $cached = $this->getCachedAccess($password);
+        if ($cached) {
+            return $cached;
         }
 
-        $third_name = strpos($username, '@') === false ? 'huami_phone' : 'email';
-        if (strpos($username, '@') === false) {
-            $username = '+86' . $username;
-        }
-        $url = 'https://api-user.zepp.com/v2/registrations/tokens';
-        $data = [
-            'emailOrPhone' => $username,
-            'password' => $password,
-            'state' => 'REDIRECTION',
-            'client_id' => 'HuaMi',
-            'country_code' => 'CN',
-            'token' => 'access',
-            'redirect_uri' => 'https://s3-us-west-2.amazonaws.com/hm-registration/successsignin.html',
-        ];
-        $body = $this->encryptData(http_build_query($data));
-        $response = $this->curl($url, $body, null, true);
-        if (preg_match("/access=(.*?)&/", $response['header'], $access)) {
-            $this->writeCache($access[1], $third_name);
-            return [$access[1], $third_name];
-        } elseif (preg_match("/refresh=(.*?)&/", $response['header'], $refresh)) {
-            $this->writeCache($refresh[1], $third_name);
-            return [$refresh[1], $third_name];
-        } elseif (strpos($response['header'], 'error=')) {
-            $this->clearCache();
-            throw new Exception('账号或密码错误!');
+        // 账号级互斥锁: 防止同一账号并发冷启动导致重复登录(缓存击穿)
+        $lockFile = $this->cacheDir . '.lock.' . md5($this->user);
+        $lockFp = @fopen($lockFile, 'c');
+        $gotLock = false;
+        if ($lockFp) {
+            for ($i = 0; $i < 200; $i++) {
+                if (flock($lockFp, LOCK_EX | LOCK_NB)) {
+                    $gotLock = true;
+                    break;
+                }
+                usleep(200000); // 最长等待 40 秒
+            }
         } else {
-            throw new Exception('登录token接口请求失败');
+            // 锁文件无法创建(如只读文件系统): 降级为无锁直连登录, 仅可能多一次重复登录
+            $gotLock = true;
+        }
+        try {
+            if ($gotLock) {
+                // 双检: 等待锁期间可能有其他进程已完成登录
+                $cached = $this->getCachedAccess($password);
+                if ($cached) {
+                    return $cached;
+                }
+
+                $third_name = strpos($username, '@') === false ? 'huami_phone' : 'email';
+                if (strpos($username, '@') === false && preg_match('/^1[3-9]\d{9}$/', $username)) {
+                    // 中国大陆 11 位手机号补 +86; 邮箱 / 已带国家码前缀 / 非手机号则原样上传
+                    $username = '+86' . $username;
+                }
+                $url = 'https://api-user.zepp.com/v2/registrations/tokens';
+                $data = [
+                    'emailOrPhone' => $username,
+                    'password' => $password,
+                    'state' => 'REDIRECTION',
+                    'client_id' => 'HuaMi',
+                    'country_code' => 'CN',
+                    'token' => 'access',
+                    'redirect_uri' => 'https://s3-us-west-2.amazonaws.com/hm-registration/successsignin.html',
+                ];
+                $body = $this->encryptData(http_build_query($data));
+        if ($body === false) {
+            throw new Exception('数据加密失败');
+        }
+                $response = $this->curl($url, $body, null, true);
+                if (preg_match("/access=(.*?)&/", $response['header'], $access)) {
+                    $this->writeCache($access[1], $third_name, $password);
+                    return [$access[1], $third_name];
+                } elseif (preg_match("/refresh=(.*?)&/", $response['header'], $refresh)) {
+                    $this->writeCache($refresh[1], $third_name, $password);
+                    return [$refresh[1], $third_name];
+                } elseif (strpos($response['header'], 'error=') !== false) {
+                    $this->clearCache();
+                    throw new Exception('账号或密码错误!');
+                } else {
+                    throw new Exception('登录token接口请求失败');
+                }
+            }
+            // 未拿到锁(超时): 最后再尝试一次缓存, 失败则提示稍后重试
+            $cached = $this->getCachedAccess($password);
+            if ($cached) {
+                return $cached;
+            }
+            throw new Exception('登录繁忙, 请稍后重试');
+        } finally {
+            if ($lockFp) {
+                if ($gotLock) {
+                    flock($lockFp, LOCK_UN);
+                }
+                fclose($lockFp);
+            }
         }
     }
 
@@ -283,19 +440,24 @@ class MiMotionRunner {
             ];
             $response = $this->curl($url, $data);
             $arr = json_decode($response['body'], true);
-            if (!$arr) {
+            if (!$arr || !is_array($arr)) {
                 throw new Exception('登录接口请求失败');
             } elseif (isset($arr['result']) && $arr['result'] == 'ok') {
-                $token = $arr['token_info']['app_token'];
-                $userid = $arr['token_info']['user_id'];
-                return [$token, $userid];
+                $token = $arr['token_info']['app_token'] ?? 0;
+                $userid = $arr['token_info']['user_id'] ?? 0;
+                if (!$token || !$userid) {
+                    throw new Exception('登录接口返回数据不完整');
+                }
+                return ['token' => $token, 'userid' => $userid, 'error' => ''];
             } else {
                 $this->clearCache();
-                throw new Exception('登录失败' . $response['body']);
+                // 只回显上游 message 字段, 不回显原始响应体, 避免泄露内部信息
+                $msg = is_string($arr['message'] ?? null) ? $arr['message'] : '登录失败';
+                throw new Exception('登录失败: ' . $msg);
             }
         } catch (Exception $e) {
             $this->logStr .= "登录异常: " . $e->getMessage() . "\n";
-            return [0, 0, $e->getMessage()];
+            return ['token' => 0, 'userid' => 0, 'error' => $e->getMessage()];
         }
     }
 
@@ -303,9 +465,9 @@ class MiMotionRunner {
         if ($this->invalid) return ["账号或密码配置有误", false];
 
         $loginResult = $this->login();
-        $token = $loginResult[0] ?? 0;
-        $userid = $loginResult[1] ?? 0;
-        $loginError = $loginResult[2] ?? '';
+        $token = $loginResult['token'] ?? 0;
+        $userid = $loginResult['userid'] ?? 0;
+        $loginError = $loginResult['error'] ?? '';
 
         if (!$token) {
             $errorMsg = $loginError ? "登录失败: {$loginError}" : "登录失败!";
@@ -313,7 +475,7 @@ class MiMotionRunner {
         }
 
         try {
-            $url = "https://api-mifit-cn.zepp.com/v1/data/band_data.json?&t=" . time();
+            $url = "https://api-mifit-cn.zepp.com/v1/data/band_data.json?t=" . time();
 $json = '[{"data_hr":"\/\/\/\/\/\/9L\/\/\/\/\/\/\/\/\/\/\/\/Vv\/\/\/\/\/\/\/\/\/\/\/0v\/\/\/\/\/\/\/\/\/\/\/9e\/\/\/\/\/0n\/a\/\/\/S\/\/\/\/\/\/\/\/\/\/\/\/0b\/\/\/\/\/\/\/\/\/\/1FK\/\/\/\/\/\/\/\/\/\/\/\/R\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/\/9PTFFpaf9L\/\/\/\/\/\/\/\/\/\/\/\/R\/\/\/\/\/\/\/\/\/\/\/\/0j\/\/\/\/\/\/\/\/\/\/\/9K\/\/\/\/\/\/\/\/\/\/\/\/Ov\/\/\/\/\/\/\/\/\/\/\/zf\/\/\/86\/zr\/Ov88\/zf\/Pf\/\/\/0v\/S\/8\/\/\/\/\/\/\/\/\/\/\/\/\/Sf\/\/\/\/\/\/\/\/\/\/\/z3\/\/\/\/\/\/0r\/Ov\/\/\/\/\/\/S\/9L\/zb\/Sf9K\/0v\/Rf9H\/zj\/Sf9K\/0\/\/N\/\/\/\/0D\/Sf83\/zr\/Pf9M\/0v\/Ov9e\/\/\/\/\/\/\/\/\/\/\/\/S\/\/\/\/\/\/\/\/\/\/\/\/zv\/\/z7\/O\/83\/zv\/N\/83\/zr\/N\/86\/z\/\/Nv83\/zn\/Xv84\/zr\/PP84\/zj\/N\/9e\/zr\/N\/89\/03\/P\/89\/z3\/Q\/9N\/0v\/Tv9C\/0H\/Of9D\/zz\/Of88\/z\/\/PP9A\/zr\/N\/86\/zz\/Nv87\/0D\/Ov84\/0v\/O\/84\/zf\/MP83\/zH\/Nv83\/zf\/N\/84\/zf\/Of82\/zf\/OP83\/zb\/Mv81\/zX\/R\/9L\/0v\/O\/9I\/0T\/S\/9A\/zn\/Pf89\/zn\/Nf9K\/07\/N\/83\/zn\/Nv83\/zv\/O\/9A\/0H\/Of8\/\/zj\/PP83\/zj\/S\/87\/zj\/Nv84\/zf\/Of83\/zf\/Of83\/zb\/Nv9L\/zj\/Nv82\/zb\/N\/85\/zf\/N\/9J\/zf\/Nv83\/zj\/Nv84\/0r\/Sv83\/zf\/MP\/\/\/zb\/Mv82\/zb\/Of85\/z7\/Nv8\/\/0r\/S\/85\/0H\/QP9B\/0D\/Nf89\/zj\/Ov83\/zv\/Nv8\/\/0f\/Sv9O\/0ZeXv\/\/\/\/\/\/\/\/\/\/\/1X\/\/\/\/\/\/\/\/\/\/\/9B\/\/\/\/\/\/\/\/\/\/\/\/TP\/\/\/1b\/\/\/\/\/\/0\/\/\/\/\/\/\/\/\/\/\/\/9N\/\/\/\/\/\/\/\/\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+\/v7+","date":"' . date('Y-m-d') . '","data":[{"start":0,"stop":1439,"value":"UA8AUBQAUAwAUBoAUAEAYCcAUBkAUB4AUBgAUCAAUAEAUBkAUAwAYAsAYB8AYB0AYBgAYCoAYBgAYB4AUCcAUBsAUB8AUBwAUBIAYBkAYB8AUBoAUBMAUCEAUCIAYBYAUBwAUCAAUBgAUCAAUBcAYBsAYCUAATIPYD0KECQAYDMAYB0AYAsAYCAAYDwAYCIAYB0AYBcAYCQAYB0AYBAAYCMAYAoAYCIAYCEAYCYAYBsAYBUAYAYAYCIAYCMAUB0AUCAAUBYAUCoAUBEAUC8AUB0AUBYAUDMAUDoAUBkAUC0AUBQAUBwAUA0AUBsAUAoAUCEAUBYAUAwAUB4AUAwAUCcAUCYAUCwKYDUAAUUlEC8IYEMAYEgAYDoAYBAAUAMAUBkAWgAAWgAAWgAAWgAAWgAAUAgAWgAAUBAAUAQAUA4AUA8AUAkAUAIAUAYAUAcAUAIAWgAAUAQAUAkAUAEAUBkAUCUAWgAAUAYAUBEAWgAAUBYAWgAAUAYAWgAAWgAAWgAAWgAAUBcAUAcAWgAAUBUAUAoAUAIAWgAAUAQAUAYAUCgAWgAAUAgAWgAAWgAAUAwAWwAAXCMAUBQAWwAAUAIAWgAAWgAAWgAAWgAAWgAAWgAAWgAAWgAAWREAWQIAUAMAWSEAUDoAUDIAUB8AUCEAUC4AXB4AUA4AWgAAUBIAUA8AUBAAUCUAUCIAUAMAUAEAUAsAUAMAUCwAUBYAWgAAWgAAWgAAWgAAWgAAWgAAUAYAWgAAWgAAWgAAUAYAWwAAWgAAUAYAXAQAUAMAUBsAUBcAUCAAWwAAWgAAWgAAWgAAWgAAUBgAUB4AWgAAUAcAUAwAWQIAWQkAUAEAUAIAWgAAUAoAWgAAUAYAUB0AWgAAWgAAUAkAWgAAWSwAUBIAWgAAUC4AWSYAWgAAUAYAUAoAUAkAUAIAUAcAWgAAUAEAUBEAUBgAUBcAWRYAUA0AWSgAUB4AUDQAUBoAXA4AUA8AUBwAUA8AUA4AUA4AWgAAUAIAUCMAWgAAUCwAUBgAUAYAUAAAUAAAUAAAUAAAUAAAUAAAUAAAUAAAUAAAWwAAUAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAeSEAeQ8AcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcBcAcAAAcAAAcCYOcBUAUAAAUAAAUAAAUAAAUAUAUAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcCgAeQAAcAAAcAAAcAAAcAAAcAAAcAYAcAAAcBgAeQAAcAAAcAAAegAAegAAcAAAcAcAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcCkAeQAAcAcAcAAAcAAAcAwAcAAAcAAAcAIAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcCIAeQAAcAAAcAAAcAAAcAAAcAAAeRwAeQAAWgAAUAAAUAAAUAAAUAAAUAAAcAAAcAAAcBoAeScAeQAAegAAcBkAeQAAUAAAUAAAUAAAUAAAUAAAUAAAcAAAcAAAcAAAcAAAcAAAcAAAegAAegAAcAAAcAAAcBgAeQAAcAAAcAAAcAAAcAAAcAAAcAkAegAAegAAcAcAcAAAcAcAcAAAcAAAcAAAcAAAcA8AeQAAcAAAcAAAeRQAcAwAUAAAUAAAUAAAUAAAUAAAUAAAcAAAcBEAcA0AcAAAWQsAUAAAUAAAUAAAUAAAUAAAcAAAcAoAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAYAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcBYAegAAcAAAcAAAegAAcAcAcAAAcAAAcAAAcAAAcAAAeRkAegAAegAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAEAcAAAcAAAcAAAcAUAcAQAcAAAcBIAeQAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcBsAcAAAcAAAcBcAeQAAUAAAUAAAUAAAUAAAUAAAUBQAcBYAUAAAUAAAUAoAWRYAWTQAWQAAUAAAUAAAUAAAcAAAcAAAcAAAcAAAcAAAcAMAcAAAcAQAcAAAcAAAcAAAcDMAeSIAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcAAAcBQAeQwAcAAAcAAAcAAAcAMAcAAAeSoAcA8AcDMAcAYAeQoAcAwAcFQAcEMAeVIAaTYAbBcNYAsAYBIAYAIAYAIAYBUAYCwAYBMAYDYAYCkAYDcAUCoAUCcAUAUAUBAAWgAAYBoAYBcAYCgAUAMAUAYAUBYAUA4AUBgAUAgAUAgAUAsAUAsAUA4AUAMAUAYAUAQAUBIAASsSUDAAUDAAUBAAYAYAUBAAUAUAUCAAUBoAUCAAUBAAUAoAYAIAUAQAUAgAUCcAUAsAUCIAUCUAUAoAUA4AUB8AUBkAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAAfgAA","tz":32,"did":"DA932FFFFE8816E7","src":24}],"summary":"{\"v\":6,\"slp\":{\"st\":1628296479,\"ed\":1628296479,\"dp\":0,\"lt\":0,\"wk\":0,\"usrSt\":-1440,\"usrEd\":-1440,\"wc\":0,\"is\":0,\"lb\":0,\"to\":0,\"dt\":0,\"rhr\":0,\"ss\":0},\"stp\":{\"ttl\":' . $step . ',\"dis\":10627,\"cal\":510,\"wk\":41,\"rn\":50,\"runDist\":7654,\"runCal\":397,\"stage\":[{\"start\":327,\"stop\":341,\"mode\":1,\"dis\":481,\"cal\":13,\"step\":680},{\"start\":342,\"stop\":367,\"mode\":3,\"dis\":2295,\"cal\":95,\"step\":2874},{\"start\":368,\"stop\":377,\"mode\":4,\"dis\":1592,\"cal\":88,\"step\":1664},{\"start\":378,\"stop\":386,\"mode\":3,\"dis\":1072,\"cal\":51,\"step\":1245},{\"start\":387,\"stop\":393,\"mode\":4,\"dis\":1036,\"cal\":57,\"step\":1124},{\"start\":394,\"stop\":398,\"mode\":3,\"dis\":488,\"cal\":19,\"step\":607},{\"start\":399,\"stop\":414,\"mode\":4,\"dis\":2220,\"cal\":120,\"step\":2371},{\"start\":415,\"stop\":427,\"mode\":3,\"dis\":1268,\"cal\":59,\"step\":1489},{\"start\":428,\"stop\":433,\"mode\":1,\"dis\":152,\"cal\":4,\"step\":238},{\"start\":434,\"stop\":444,\"mode\":3,\"dis\":2295,\"cal\":95,\"step\":2874},{\"start\":445,\"stop\":455,\"mode\":4,\"dis\":1592,\"cal\":88,\"step\":1664},{\"start\":456,\"stop\":466,\"mode\":3,\"dis\":1072,\"cal\":51,\"step\":1245},{\"start\":467,\"stop\":477,\"mode\":4,\"dis\":1036,\"cal\":57,\"step\":1124},{\"start\":478,\"stop\":488,\"mode\":3,\"dis\":488,\"cal\":19,\"step\":607},{\"start\":489,\"stop\":499,\"mode\":4,\"dis\":2220,\"cal\":120,\"step\":2371},{\"start\":500,\"stop\":511,\"mode\":3,\"dis\":1268,\"cal\":59,\"step\":1489},{\"start\":512,\"stop\":522,\"mode\":1,\"dis\":152,\"cal\":4,\"step\":238}]},\"goal\":8000,\"tz\":\"28800\"}","source":24,"type":0}]';
             $data = [
                 'data_json' => $json,
@@ -341,14 +503,8 @@ $json = '[{"data_hr":"\/\/\/\/\/\/9L\/\/\/\/\/\/\/\/\/\/\/\/Vv\/\/\/\/\/\/\/\/\/
 
 // ==================== 网页界面(运动竞速仪表风格) ====================
 function showWebPage() {
-    $self = htmlspecialchars($_SERVER['PHP_SELF'] ?? '/');
-    $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    // 兼容反向代理(如 Vercel)下 HTTPS 由代理终结的情况
-    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
-        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https')
-        || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
-    $scheme = $isHttps ? 'https' : 'http';
-    $base = $scheme . '://' . $host . $self;
+    global $token;
+    $base = baseUrl();
 ?>
 <!DOCTYPE html>
 <html lang="zh-CN">
@@ -358,10 +514,7 @@ function showWebPage() {
 <meta name="description" content="STEP.ENGINE - 小米运动 Zepp Life 步数同步引擎, 一键同步微信运动 / 支付宝运动">
 <title>STEP.ENGINE - 把今天的目标跑出来</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ff4d00'/%3E%3Cpath d='M8 21h3l2-8 4 13 3-11 1 6h3' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/lucide@latest"></script>
+<script src="https://unpkg.com/lucide@0.462.0"></script>
 <style>
 :root {
     --bg: #f6f5f1;
@@ -429,7 +582,7 @@ a { text-decoration: none; color: inherit; }
     font-family: 'JetBrains Mono'; font-weight: 800; font-size: 16px;
 }
 .brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.02em; }
-.brand-sub { font-size: 10px; color: var(--muted); letter-spacing: 0.14em; text-transform: uppercase; margin-top: 2px; font-family: 'JetBrains Mono'; }
+.brand-sub { display: block; font-size: 10px; color: var(--muted); letter-spacing: 0.14em; text-transform: uppercase; margin-top: 2px; font-family: 'JetBrains Mono'; }
 .top-actions { display: flex; align-items: center; gap: 8px; }
 .icon-btn {
     width: 38px; height: 38px; border-radius: 8px;
@@ -675,7 +828,7 @@ a { text-decoration: none; color: inherit; }
     padding: 28px clamp(20px, 5vw, 64px);
     display: flex; justify-content: space-between; align-items: center;
     flex-wrap: wrap; gap: 14px;
-    font-size: 13px; color: var(--muted);
+    color: var(--muted);
     font-family: 'JetBrains Mono'; font-size: 12px;
 }
 .footer a { color: var(--muted); }
@@ -705,11 +858,11 @@ a { text-decoration: none; color: inherit; }
         <span class="brand-mark">S</span>
         <span>
             <span class="brand-name">STEP.ENGINE</span>
-            <div class="brand-sub">Zepp Life Step Sync</div>
+            <span class="brand-sub">Zepp Life Step Sync</span>
         </span>
     </a>
     <div class="top-actions">
-        <a class="top-link" href="docs/"><i data-lucide="book-open" style="width:15px;height:15px"></i> API 文档</a>
+        <a class="top-link" href="?m=appinfo"><i data-lucide="book-open" style="width:15px;height:15px"></i> API 文档</a>
         <a class="top-link" href="https://github.com/1837620622/sport-xiaomi" target="_blank" rel="noopener"><i data-lucide="external-link" style="width:15px;height:15px"></i> GitHub</a>
         <button class="icon-btn" id="themeBtn" title="切换主题" onclick="toggleTheme()"><i data-lucide="moon" style="width:17px;height:17px"></i></button>
     </div>
@@ -829,13 +982,14 @@ a { text-decoration: none; color: inherit; }
 <footer class="footer">
     <span>© 传康KK · STEP.ENGINE · 仅供个人学习研究</span>
     <div class="fl">
-        <a href="docs/">API 文档</a>
+        <a href="?m=appinfo">API 文档</a>
         <a href="https://github.com/1837620622/sport-xiaomi" target="_blank" rel="noopener">GitHub</a>
     </div>
 </footer>
 
 <script>
 lucide.createIcons();
+document.querySelectorAll('svg.lucide').forEach(function (s) { s.setAttribute('aria-hidden', 'true'); });
 
 /* ---------- 主题切换 ---------- */
 (function () {
@@ -852,8 +1006,11 @@ function toggleTheme() {
 }
 function syncThemeIcon() {
     const dark = document.documentElement.dataset.theme === 'dark';
-    const ic = document.querySelector('#themeBtn i');
-    if (ic) { ic.setAttribute('data-lucide', dark ? 'sun' : 'moon'); lucide.createIcons(); }
+    const btn = document.querySelector('#themeBtn');
+    if (btn) {
+        btn.innerHTML = '<i data-lucide="' + (dark ? 'sun' : 'moon') + '" style="width:17px;height:17px"></i>';
+        lucide.createIcons();
+    }
 }
 
 /* ---------- 密码可见 ---------- */
@@ -861,8 +1018,11 @@ function togglePwd() {
     const inp = document.getElementById('fPwd');
     const show = inp.type === 'password';
     inp.type = show ? 'text' : 'password';
-    document.getElementById('eyeIc').setAttribute('data-lucide', show ? 'eye-off' : 'eye');
-    lucide.createIcons();
+    const eye = document.getElementById('eyeIc');
+    if (eye) {
+        eye.setAttribute('data-lucide', show ? 'eye-off' : 'eye');
+        lucide.createIcons();
+    }
 }
 
 /* ---------- 记分牌联动(数字滚动动画) ---------- */
@@ -897,7 +1057,7 @@ document.querySelectorAll('.bib').forEach(function (b) {
     });
 });
 function randomStep() {
-    const v = Math.floor(18000 + Math.random() * 12000);
+    const v = 18000 + Math.floor(Math.random() * 12001);
     stepInput.value = v;
     paintGauge(v);
     const q = document.querySelector('.bib.active');
@@ -924,6 +1084,7 @@ function termClear() {
     termBody.innerHTML = '';
     const empty = document.createElement('span');
     empty.className = 'line term-empty';
+    empty.id = 'termEmpty';
     empty.textContent = '等待任务... 填写账号并点击提交同步';
     termBody.appendChild(empty);
 }
@@ -957,7 +1118,13 @@ function termCursor(on) {
     termBody.scrollTop = termBody.scrollHeight;
 }
 function escapeHtml(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+/* ---------- 账号脱敏(邮箱/手机号) ---------- */
+function maskUser(u) {
+    if (u.indexOf('@') !== -1) return u.replace(/(.{3}).*(@.*)/, '$1****$2');
+    return u.length > 7 ? u.slice(0, 3) + '****' + u.slice(-4) : u.slice(0, 1) + '***' + u.slice(-1);
 }
 
 /* ---------- 提交 ---------- */
@@ -973,21 +1140,28 @@ function doSubmit() {
     const btn = document.getElementById('submitBtn');
     btn.disabled = true;
     btn.classList.add('loading');
+    gaugeValue.classList.remove('ok', 'err');
     termClear();
     termCursor(true);
-    termCmd('step-engine --user ' + user.replace(/(.{3}).*(@.*)/, '$1****$2') + ' --step ' + step);
+    termCmd('step-engine --user ' + maskUser(user) + ' --step ' + step);
 
     const body = new URLSearchParams();
     body.append('user', user);
     body.append('pwd', pwd);
     body.append('step', step);
+    body.append('token', '<?php echo htmlspecialchars($token, ENT_QUOTES); ?>');
 
     fetch('<?php echo $base; ?>', {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: body.toString()
     })
-    .then(function (r) { return r.json(); })
+    .then(function (r) {
+        return r.json().catch(function () { return { raw: true }; }).then(function (j) {
+            if (!r.ok && j.raw) throw new Error('HTTP ' + r.status);
+            return j;
+        });
+    })
     .then(function (j) {
         termCursor(false);
         termLine('d', '> ' + (j.time || new Date().toLocaleString()));
@@ -1018,22 +1192,399 @@ function doSubmit() {
     exit;
 }
 
+// ==================== API 文档页(独立一页) ====================
+function showAppInfo() {
+    global $token;
+    $base = baseUrl();
+?>
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="STEP.ENGINE API 文档 - 小米运动 Zepp Life 步数同步接口说明">
+<title>STEP.ENGINE - API 文档</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ff4d00'/%3E%3Cpath d='M8 21h3l2-8 4 13 3-11 1 6h3' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script src="https://unpkg.com/lucide@0.462.0"></script>
+<style>
+:root {
+    --bg: #f6f5f1;
+    --bg-2: #eeede8;
+    --fg: #101010;
+    --muted: #6f6e67;
+    --line: rgba(16,16,16,0.12);
+    --card: #fcfbf8;
+    --accent: #ff4d00;
+    --accent-ink: #ffffff;
+    --ok: #1a9c5c;
+    --err: #d92d20;
+    --grid: rgba(16,16,16,0.05);
+    --code-bg: #101010;
+    --code-fg: #e8e6df;
+    --shadow: 0 1px 2px rgba(0,0,0,0.05), 0 12px 32px -20px rgba(0,0,0,0.16);
+}
+[data-theme="dark"] {
+    --bg: #0b0b0a;
+    --bg-2: #121210;
+    --fg: #f2f1ec;
+    --muted: #8f8e86;
+    --line: rgba(242,241,236,0.13);
+    --card: #141412;
+    --accent: #ff5a1f;
+    --accent-ink: #0b0b0a;
+    --ok: #34d399;
+    --err: #f87171;
+    --grid: rgba(242,241,236,0.045);
+    --code-bg: #000000;
+    --code-fg: #e8e6df;
+    --shadow: none;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+    background-color: var(--bg);
+    background-image:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 72px 72px;
+    color: var(--fg);
+    font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+    min-height: 100vh;
+    transition: background .35s ease, color .35s ease;
+    overflow-x: hidden;
+}
+::selection { background: var(--accent); color: var(--accent-ink); }
+a { text-decoration: none; color: inherit; }
+
+/* ---------- 顶栏 ---------- */
+.topbar {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px clamp(20px, 5vw, 64px);
+    background: color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+    width: 36px; height: 36px; border-radius: 8px;
+    background: var(--accent); color: var(--accent-ink);
+    display: grid; place-items: center;
+    font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 16px;
+}
+.brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.02em; }
+.brand-sub { display: block; font-size: 10px; color: var(--muted); letter-spacing: 0.14em; text-transform: uppercase; margin-top: 2px; font-family: 'JetBrains Mono', monospace; }
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.icon-btn {
+    width: 38px; height: 38px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card);
+    color: var(--fg); display: inline-grid; place-items: center;
+    cursor: pointer; transition: all .2s ease;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.top-link {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 9px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card);
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: all .2s ease;
+}
+.top-link:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ---------- 文档页主体 ---------- */
+.wrap {
+    max-width: 960px; margin: 0 auto;
+    padding: clamp(40px, 6vw, 72px) clamp(20px, 5vw, 64px) 90px;
+}
+.wrap h1 { font-size: clamp(36px, 5vw, 56px); letter-spacing: -0.04em; line-height: 1; }
+.wrap h1 em { color: var(--accent); font-style: normal; }
+.wrap .sub { color: var(--muted); font-family: 'JetBrains Mono', monospace; font-size: 13px; margin-top: 16px; }
+.doc-card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: var(--shadow);
+    margin-top: 26px;
+}
+.doc-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 22px; border-bottom: 1px solid var(--line);
+    font-size: 14px; font-weight: 600; letter-spacing: 0.03em;
+}
+.doc-head .pn {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 700;
+    color: var(--accent); letter-spacing: 0.14em;
+    border: 1px solid var(--line); padding: 3px 8px;
+}
+.doc-head .ic { color: var(--muted); display: inline-flex; }
+.doc-body { padding: clamp(18px, 2.5vw, 26px); }
+.param-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.param-table th {
+    text-align: left; font-size: 11.5px; text-transform: uppercase; letter-spacing: .1em;
+    color: var(--muted); font-family: 'JetBrains Mono', monospace;
+    padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.param-table td { padding: 12px; border-bottom: 1px solid var(--line); vertical-align: top; line-height: 1.65; }
+.param-table tr:last-child td { border-bottom: none; }
+.param-table code {
+    font-family: 'JetBrains Mono', monospace; background: var(--bg-2);
+    padding: 2px 7px; border-radius: 4px; font-size: 12.5px;
+}
+.badge { display: inline-block; font-family: 'JetBrains Mono', monospace; font-size: 11px; padding: 2px 8px; border-radius: 4px; }
+.badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+.badge.err { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); }
+.req { color: var(--err); font-weight: 700; }
+.code-block {
+    background: var(--code-bg); color: var(--code-fg);
+    font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.85;
+    padding: 16px 18px; border-radius: 8px; margin-top: 14px;
+    overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+}
+.code-block .cm { color: #8f8e86; }
+.code-block .cc { color: #ff5a1f; }
+.code-block .ok- { color: #34d399; }
+.code-block .err- { color: #f87171; }
+.copy-btn {
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
+    padding: 7px 12px; border: 1px solid var(--line); background: var(--bg);
+    color: var(--muted); font-size: 12px; font-family: 'JetBrains Mono', monospace;
+    cursor: pointer; border-radius: 6px; transition: all .2s;
+}
+.copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+.copy-btn.copied { color: var(--ok); border-color: var(--ok); }
+
+/* ---------- 页脚 ---------- */
+.footer {
+    border-top: 1px solid var(--line);
+    padding: 28px clamp(20px, 5vw, 64px);
+    display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 14px;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+}
+.footer a { color: var(--muted); }
+.footer a:hover { color: var(--accent); }
+.footer .fl a { margin-left: 18px; }
+
+/* ---------- 响应式 ---------- */
+@media (max-width: 560px) {
+    .brand-sub { display: none; }
+    .param-table { font-size: 13px; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+    <a class="brand" href="<?php echo $base; ?>">
+        <span class="brand-mark">S</span>
+        <span>
+            <span class="brand-name">STEP.ENGINE</span>
+            <span class="brand-sub">API Documentation</span>
+        </span>
+    </a>
+    <div class="top-actions">
+        <a class="top-link" href="https://github.com/1837620622/sport-xiaomi" target="_blank" rel="noopener"><i data-lucide="external-link" style="width:15px;height:15px"></i> GitHub</a>
+        <button class="icon-btn" id="themeBtn" title="切换主题" onclick="toggleTheme()"><i data-lucide="moon" style="width:17px;height:17px"></i></button>
+    </div>
+</div>
+
+<div class="wrap">
+    <h1>API <em>文档</em></h1>
+    <p class="sub" id="baseShow">GET / POST 均支持 · step 支持数字或"随机数" · 返回 JSON</p>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">01</span><span class="ic"><i data-lucide="info" style="width:16px;height:16px"></i></span> 基本信息</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>项目</th><th>内容</th></tr>
+                <tr><td>接口地址 (Base URL)</td><td><code id="apiBase">(自动检测)</code></td></tr>
+                <tr><td>请求方式</td><td><span class="badge ok">GET</span> 查询参数 <span class="badge ok">POST</span> 表单参数 (推荐)</td></tr>
+                <tr><td>内容类型</td><td><code>application/x-www-form-urlencoded; charset=UTF-8</code></td></tr>
+                <tr><td>返回格式</td><td><code>application/json; charset=utf-8</code></td></tr>
+                <tr><td>频率限制</td><td>同一 IP 每分钟最多 <b>10</b> 次, 超出返回 429</td></tr>
+                <tr><td>登录缓存</td><td>7 天内同一账号不重复调用上游登录接口</td></tr>
+                <tr><td>版本</td><td>V3.0 · Zepp Life API</td></tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">02</span><span class="ic"><i data-lucide="list" style="width:16px;height:16px"></i></span> 请求参数</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>参数</th><th>必填</th><th>类型</th><th>说明</th></tr>
+                <tr><td><code>user</code></td><td><span class="req">是</span></td><td>string</td><td>Zepp Life(原小米运动)账号, 支持手机号或邮箱</td></tr>
+                <tr><td><code>pwd</code></td><td><span class="req">是</span></td><td>string</td><td>账号登录密码, 建议用 POST 提交避免出现在 URL 中</td></tr>
+                <tr><td><code>step</code></td><td><span class="req">是</span></td><td>int / string</td><td>目标步数: 数字 <code>1~98800</code>; 或字符串 <code>随机数</code> (自动生成 18000~30000)</td></tr>
+                <tr><td><code>token</code></td><td><span class="req">条件</span></td><td>string</td><td>API 密钥 <code>666</code>: GET 请求 <b>必填</b>; POST 请求填了则跳过同源检查, 网页表单同源 POST 可省略</td></tr>
+            </table>
+            <div class="code-block"><span class="cm"># token 校验规则 (优先级从高到低)</span><br>1. POST 且请求来自本页面(同源) → 自动放行<br>2. 请求携带 token 且等于服务端密钥 → 放行<br>3. 其余情况 → 返回 401 Unauthorized</div>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">03</span><span class="ic"><i data-lucide="terminal" style="width:16px;height:16px"></i></span> 请求示例</div>
+        <div class="doc-body">
+            <div class="code-block" id="code1"><span class="cm"># GET · 固定步数 (需带 token)</span><br><span class="cc">$</span> curl "<?php echo $base; ?>?user=13888888888&pwd=yourpassword&step=28000&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
+            <button class="copy-btn" data-target="code1"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code2"><span class="cm"># GET · 随机步数 18000~30000</span><br><span class="cc">$</span> curl "<?php echo $base; ?>?user=you@example.com&pwd=yourpassword&step=随机数&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
+            <button class="copy-btn" data-target="code2"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code3"><span class="cm"># POST · 表单提交, 推荐方式 (密码不进 URL)</span><br><span class="cc">$</span> curl -X POST "<?php echo $base; ?>" -d "user=you@example.com&pwd=yourpassword&step=28000&token=<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"</div>
+            <button class="copy-btn" data-target="code3"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code4"><span class="cm"># Python 3 · requests 调用示例</span><br>import requests<br><br>r = requests.post("<?php echo $base; ?>", data={<br>&nbsp;&nbsp;&nbsp;&nbsp;"user": "you@example.com",<br>&nbsp;&nbsp;&nbsp;&nbsp;"pwd": "yourpassword",<br>&nbsp;&nbsp;&nbsp;&nbsp;"step": "随机数",<br>&nbsp;&nbsp;&nbsp;&nbsp;"token": "<?php echo htmlspecialchars($token, ENT_QUOTES); ?>"<br>})<br>print(r.json())</div>
+            <button class="copy-btn" data-target="code4"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">04</span><span class="ic"><i data-lucide="braces" style="width:16px;height:16px"></i></span> 返回结果</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+                <tr><td><code>time</code></td><td>string</td><td>提交时间 (格式 <code>Y-m-d H:i:s</code>)</td></tr>
+                <tr><td><code>user</code></td><td>string</td><td>脱敏后的账号 (如 <code>138****8888</code>)</td></tr>
+                <tr><td><code>step</code></td><td>int</td><td>实际提交的步数 (随机模式返回本次生成的值)</td></tr>
+                <tr><td><code>status</code></td><td>string</td><td><span class="badge ok">success</span> 或 <span class="badge err">failed</span></td></tr>
+                <tr><td><code>message</code></td><td>string</td><td>详细提示信息, 失败时含原因 (如账号密码错误)</td></tr>
+            </table>
+            <div class="code-block" id="code5"><span class="cm"># 成功响应 (HTTP 200)</span><br>{<br>&nbsp;&nbsp;"time": "<?php echo date('Y-m-d H:i:s'); ?>",<br>&nbsp;&nbsp;"user": "138****8888",<br>&nbsp;&nbsp;"step": 28000,<br>&nbsp;&nbsp;<span class="ok-">"status": "success"</span>,<br>&nbsp;&nbsp;"message": "修改步数(28000)"<br>}</div>
+            <button class="copy-btn" data-target="code5"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code6"><span class="cm"># 失败响应 (HTTP 200, 业务失败)</span><br>{<br>&nbsp;&nbsp;"time": "<?php echo date('Y-m-d H:i:s'); ?>",<br>&nbsp;&nbsp;"user": "138****8888",<br>&nbsp;&nbsp;"step": 28000,<br>&nbsp;&nbsp;<span class="err-">"status": "failed"</span>,<br>&nbsp;&nbsp;"message": "登录失败: 账号或密码错误!"<br>}</div>
+            <button class="copy-btn" data-target="code6"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">05</span><span class="ic"><i data-lucide="shield-alert" style="width:16px;height:16px"></i></span> 错误码 (HTTP 状态码)</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>状态码</th><th>说明</th><th>常见场景</th></tr>
+                <tr><td><span class="badge ok">200</span></td><td>请求处理完成</td><td>正常返回, 看 <code>status</code> 字段判断业务成败</td></tr>
+                <tr><td><span class="badge err">400</span></td><td>参数错误</td><td>缺少 <code>user</code>/<code>pwd</code>/<code>step</code> 或步数超出 1~98800</td></tr>
+                <tr><td><span class="badge err">401</span></td><td>密钥无效</td><td>GET 未带 token 或 token 错误</td></tr>
+                <tr><td><span class="badge err">404</span></td><td>接口不存在</td><td>未知的 <code>m</code> 参数 (如 <code>?m=xxx</code>)</td></tr>
+                <tr><td><span class="badge err">429</span></td><td>请求过于频繁</td><td>同一 IP 超过每分钟 10 次, 请稍后重试</td></tr>
+                <tr><td><span class="badge err">500</span></td><td>服务器内部错误</td><td>上游服务不可达或未知异常, 稍后重试</td></tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">06</span><span class="ic"><i data-lucide="alert-triangle" style="width:16px;height:16px"></i></span> 注意事项</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><td>1</td><td>账号为 <b>Zepp Life / 小米运动</b> 账号, 不是小米账号, 两者不同</td></tr>
+                <tr><td>2</td><td>需要先在 Zepp Life App 中绑定微信 / 支付宝等第三方平台, 步数才会同步过去</td></tr>
+                <tr><td>3</td><td>不建议使用 66666 / 88888 等特殊步数, 可能被平台判定异常</td></tr>
+                <tr><td>4</td><td>登录信息缓存 7 天, 同一账号无需重复登录; 修改密码后等待缓存过期即可</td></tr>
+                <tr><td>5</td><td>参数请使用 URL 编码 (curl 的 <code>--data-urlencode</code> 或 requests 的 <code>data=</code> 会自动处理)</td></tr>
+                <tr><td>6</td><td>本工具仅供个人学习研究, 请勿商用</td></tr>
+            </table>
+        </div>
+    </div>
+</div>
+
+<footer class="footer">
+    <span>© 传康KK · STEP.ENGINE</span>
+    <div class="fl">
+        <a href="<?php echo $base; ?>">返回首页</a>
+        <a href="https://github.com/1837620622/sport-xiaomi" target="_blank" rel="noopener">GitHub</a>
+    </div>
+</footer>
+
+<script>
+lucide.createIcons();
+document.querySelectorAll('svg.lucide').forEach(function (s) { s.setAttribute('aria-hidden', 'true'); });
+
+/* 自动填充接口地址 */
+(function () {
+    var box = document.getElementById('apiBase');
+    if (box) { box.textContent = location.origin + location.pathname; }
+})();
+
+/* 主题切换 */
+(function () {
+    const saved = localStorage.getItem('step-theme');
+    const prefers = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = saved || prefers;
+    syncThemeIcon();
+})();
+function toggleTheme() {
+    const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = cur;
+    localStorage.setItem('step-theme', cur);
+    syncThemeIcon();
+}
+function syncThemeIcon() {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    const btn = document.querySelector('#themeBtn');
+    if (btn) {
+        btn.innerHTML = '<i data-lucide="' + (dark ? 'sun' : 'moon') + '" style="width:17px;height:17px"></i>';
+        lucide.createIcons();
+    }
+}
+
+/* 复制代码(带旧浏览器降级方案) */
+function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); resolve(); }
+        catch (e) { reject(e); }
+        document.body.removeChild(ta);
+    });
+}
+document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        var block = document.getElementById(this.dataset.target);
+        var text = block.textContent.replace(/^# [^\n]*\n/m, '').trim();
+        var that = this;
+        copyText(text).then(function () {
+            that.innerHTML = '<i data-lucide="check" style="width:13px;height:13px"></i> 已复制';
+            lucide.createIcons();
+            setTimeout(function () {
+                that.innerHTML = '<i data-lucide="copy" style="width:13px;height:13px"></i> 复制';
+                lucide.createIcons();
+            }, 1600);
+        });
+    });
+});
+</script>
+</body>
+</html>
+<?php
+    exit;
+}
+
 // ==================== 主执行逻辑 ====================
 // GET / POST 统一处理(网页表单与 API 调用)
-if ($_SERVER['REQUEST_METHOD'] === 'POST' || (isset($_GET['token']) && $_GET['token'] !== '')) {
+if ($_SERVER['REQUEST_METHOD'] === 'POST' || isset($_GET['token']) || isset($_POST['token'])) {
+    // 带 m 参数的 API 调用: 文档页优先返回, 其余 m 一律 404
+    if (isset($_GET['m'])) {
+        if ($_GET['m'] === 'appinfo') {
+            showAppInfo();
+        } else {
+            jsonResponse(["error" => "not found"], 404);
+        }
+    }
+
+    // token 校验前置: 未认证请求不消耗限频配额
+    // 网页表单(POST 同源请求)自动携带渲染的 token, 亦可通过校验
+    $isWebForm = $_SERVER['REQUEST_METHOD'] === 'POST' && isSameOrigin();
+    $validToken = (isset($_GET['token']) || isset($_POST['token'])) && param('token') === $token;
+    if (!$validToken && !$isWebForm) {
+        jsonResponse(["error" => "Token 验证失败"], 401);
+    }
+
     // 频率限制检查
     list($rateLimitOk, $rateLimitMsg) = checkRateLimit();
     if (!$rateLimitOk) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(["error" => $rateLimitMsg], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-        exit;
-    }
-
-    // GET API 调用时校验 token
-    if ($_SERVER['REQUEST_METHOD'] === 'GET' && (!isset($_GET['token']) || $_GET['token'] !== $token)) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(["error" => "Token 验证失败"], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-        exit;
+        jsonResponse(["error" => $rateLimitMsg], 429);
     }
 
     $user = param('user');
@@ -1041,21 +1592,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' || (isset($_GET['token']) && $_GET['to
     $step = param('step');
 
     if (!$user || !$pwd || $step === '') {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(["error" => "参数不完整, 必须提供 user, pwd, step"], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-        exit;
+        jsonResponse(["error" => "参数不完整, 必须提供 user, pwd, step"], 400);
     }
 
     // 步数解析(支持数字 / 随机数)
-    list($stepValid, $stepResult, $isRandom) = resolveStep($step);
+    list($stepValid, $stepResult) = resolveStep($step);
     if (!$stepValid) {
-        header('Content-Type: application/json; charset=utf-8');
-        echo json_encode(["error" => $stepResult], JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-        exit;
+        jsonResponse(["error" => $stepResult], 400);
     }
 
-    $runner = new MiMotionRunner($user, $pwd);
-    list($msg, $success) = $runner->loginAndPostStep($stepResult);
+    try {
+        $runner = new MiMotionRunner($user, $pwd);
+        list($msg, $success) = $runner->loginAndPostStep($stepResult);
+    } catch (Exception $e) {
+        jsonResponse(["error" => "服务器内部错误: " . $e->getMessage()], 500);
+    }
 
     $output = [
         "time" => date("Y-m-d H:i:s"),
@@ -1065,8 +1616,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' || (isset($_GET['token']) && $_GET['to
         "message" => $msg
     ];
 
-    header('Content-Type: application/json; charset=utf-8');
-    echo json_encode($output, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
-    exit;
+    jsonResponse($output, 200);
 }
 ?>
