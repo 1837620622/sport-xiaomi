@@ -1,442 +1,262 @@
-# 🏃 小米运动刷步数工具（Zepp API 版本）
+# STEP.ENGINE · 小米运动(Zepp Life)刷步数工具
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-2.0-blue.svg" alt="Version">
+  <img src="https://img.shields.io/badge/Version-3.0-orange.svg" alt="Version">
   <img src="https://img.shields.io/badge/PHP-7.0+-green.svg" alt="PHP">
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
-  <img src="https://img.shields.io/badge/Author-传康KK-purple.svg" alt="Author">
+  <img src="https://img.shields.io/badge/Author-传康KK-red.svg" alt="Author">
 </p>
 
 <p align="center">
-  <strong>一款基于 Zepp API 的小米运动步数修改工具</strong><br>
-  支持网页界面操作和 API 接口调用，可同步微信、支付宝、QQ等第三方平台运动数据
+  <strong>基于 Zepp 官方 API 的步数同步引擎</strong><br>
+  云端直连小米运动 / Zepp Life 服务, 一键同步微信运动、支付宝运动、QQ 运动等已绑定平台
+</p>
+
+<p align="center">
+  <a href="https://sport-xiaomi.vercel.app">在线演示 (Vercel)</a> ·
+  <a href="http://118.195.148.242:666">在线演示 (独立服务器)</a>
 </p>
 
 ---
 
-## 📖 项目简介
+## 项目简介
 
-本工具是一个 PHP 单文件应用，通过调用小米 Zepp 官方 API 接口实现运动步数的修改功能。修改后的步数可自动同步到已绑定的第三方平台（微信运动、支付宝运动、QQ运动等）。
+STEP.ENGINE 是一个 PHP 应用, 通过调用 Zepp 官方 API 实现运动步数同步。支持**网页界面操作**与**HTTP API 调用**两种方式, 修改后的步数自动同步至已绑定的第三方平台。
 
-### ⚠️ 免责声明
-
-**本工具仅供个人学习、研究使用，禁止用于商业用途！使用本工具产生的任何后果由使用者自行承担。建议使用小号进行测试。**
+**免责声明**: 本工具仅供个人学习、研究使用, 禁止用于商业用途! 使用本工具产生的任何后果由使用者自行承担, 建议使用小号测试。
 
 ---
 
-## ✨ 功能特性
+## 功能特性
 
 | 特性 | 描述 |
 |------|------|
-| 🔐 **安全设计** | 不存储用户密码，仅缓存登录 Token |
-| ⚡ **智能缓存** | 登录信息缓存 7 天，大幅提升访问速度 |
-| 🌐 **双模式** | 支持网页界面操作和 API 接口调用 |
-| 📱 **多账号类型** | 支持手机号和邮箱两种账号登录方式 |
-| 🔄 **自动同步** | 修改后自动同步到微信、支付宝、QQ 等平台 |
-| 🛡️ **并发安全** | 采用文件锁机制防止并发写入冲突 |
-| 🎨 **美观界面** | 现代化渐变 UI 设计，响应式布局适配移动端 |
+| 双模式 | 网页表单提交 + HTTP API 调用 (GET / POST) |
+| 随机步数 | `step=随机数` 自动生成 18000~30000, 降低异常判定风险 |
+| 安全设计 | 不存储密码, 仅缓存登录 Token (7 天) |
+| 频率限制 | 同一 IP 每分钟最多 10 次 |
+| 参数校验 | 步数范围 1~98800, 防注入安全文件名过滤 |
+| 并发安全 | 文件锁机制防止并发写入冲突 |
+| 双主题 | 深色 / 浅色主题, 响应式适配移动端 |
+| 独立文档 | 内置 API 文档页, 开箱即用 |
 
 ---
 
-## 🔧 技术架构
+## 快速开始
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                    小米运动刷步数工具                      │
-├─────────────────────────────────────────────────────────┤
-│  前端界面层                                               │
-│  ├── LayUI 框架 (v2.6.8)                                 │
-│  ├── 响应式 CSS 设计                                      │
-│  └── AJAX 异步提交                                        │
-├─────────────────────────────────────────────────────────┤
-│  后端逻辑层                                               │
-│  ├── MiMotionRunner 核心类                               │
-│  ├── AES-128-CBC 加密模块                                │
-│  ├── Token 缓存管理                                       │
-│  └── cURL HTTP 客户端                                    │
-├─────────────────────────────────────────────────────────┤
-│  外部 API                                                │
-│  ├── api-user.zepp.com (登录认证)                        │
-│  ├── account.zepp.com (账号验证)                         │
-│  └── api-mifit-cn.zepp.com (步数同步)                    │
-└─────────────────────────────────────────────────────────┘
-```
+### 环境要求
 
----
+- PHP >= 7.0 (推荐 8.x)
+- PHP 扩展: `curl`、`openssl`、`json`
+- Web 服务器: 任意支持 PHP 的服务器 / `php -S` 内置服务器
 
-## 📦 环境要求
-
-- **PHP 版本**: >= 7.0
-- **PHP 扩展**: 
-  - `curl` - 用于 HTTP 请求
-  - `openssl` - 用于 AES 加密
-  - `json` - 用于数据处理
-- **Web 服务器**: Apache / Nginx / 其他支持 PHP 的服务器
-
----
-
-## 🚀 部署指南
-
-### 方式一：Vercel 部署（推荐）
-
-本项目已配置 Vercel 部署支持：
-
-1. 访问 [Vercel](https://vercel.com) 并使用 GitHub 登录
-2. 点击 "Add New..." → "Project"
-3. 导入仓库 `1837620622/sport-xiaomi`
-4. 直接点击 "Deploy" 即可
-5. 部署完成后访问：https://sport-xiaomi.vercel.app
-
-### 🌐 在线演示
-
-**在线地址**：[https://sport-xiaomi.vercel.app](https://sport-xiaomi.vercel.app)
-
-> ⚠️ **注意**：Vercel 无服务器环境下缓存功能受限
-
-### 方式二：宝塔面板部署（完整功能）
+### 本地启动 (Mac / Linux)
 
 ```bash
-# 1. 在宝塔面板创建站点
-
-# 2. 进入站点目录，拉取代码
-git clone https://github.com/1837620622/sport-xiaomi.git .
-
-# 3. 设置 cache 目录权限
-chmod 777 cache/
-```
-
-### Mac 系统部署
-
-#### 方式一：使用内置 PHP 服务器（推荐测试使用）
-
-```bash
-# 1. 进入项目目录
-cd /path/to/sport-xiaomi
-
-# 2. 启动 PHP 内置服务器
-php -S localhost:8080
-
-# 3. 打开浏览器访问
-open http://localhost:8080
-```
-
-#### 方式二：使用 MAMP 环境
-
-```bash
-# 1. 下载并安装 MAMP
-# 官网: https://www.mamp.info/
-
-# 2. 将项目文件复制到 MAMP 网站目录
-cp -r sport-xiaomi /Applications/MAMP/htdocs/
-
-# 3. 启动 MAMP 并访问
-open http://localhost:8888/sport-xiaomi/
-```
-
-#### 方式三：使用 Homebrew + PHP
-
-```bash
-# 1. 安装 PHP（如未安装）
-brew install php
-
-# 2. 进入项目目录并启动服务
-cd /path/to/sport-xiaomi
+cd sport-xiaomi
+mkdir -p cache && chmod 777 cache
 php -S 0.0.0.0:666
-
-# 3. 访问（局域网内其他设备也可访问）
-# http://你的IP:666
+# 浏览器访问 http://localhost:666
+# API 文档 http://localhost:666/docs/
 ```
 
----
+### Windows 启动
 
-### Windows 系统部署
-
-#### 方式一：使用 PHPStudy（推荐）
-
-```bash
-# 1. 下载并安装 PHPStudy
-# 官网: https://www.xp.cn/
-
-# 2. 将项目文件复制到网站目录
-# 默认路径: C:\phpstudy_pro\WWW\sport-xiaomi
-
-# 3. 启动 PHPStudy，开启 Apache 和 MySQL
-
-# 4. 浏览器访问
-# http://localhost/sport-xiaomi/
-```
-
-#### 方式二：使用 XAMPP
-
-```bash
-# 1. 下载并安装 XAMPP
-# 官网: https://www.apachefriends.org/
-
-# 2. 将项目文件复制到网站目录
-# 路径: C:\xampp\htdocs\sport-xiaomi
-
-# 3. 启动 XAMPP 控制面板，开启 Apache
-
-# 4. 浏览器访问
-# http://localhost/sport-xiaomi/
-```
-
-#### 方式三：使用 PHP 内置服务器
-
-```bash
-# 1. 确保已安装 PHP 并配置环境变量
-
-# 2. 命令行进入项目目录
-cd C:\path\to\sport-xiaomi
-
-# 3. 启动服务器
+```powershell
+cd sport-xiaomi
 php -S localhost:8080
-
-# 4. 浏览器访问
-# http://localhost:8080
+# 浏览器访问 http://localhost:8080
 ```
 
----
-
-### 服务器部署（Linux）
+### 服务器部署 (Linux)
 
 ```bash
-# 1. 安装 LNMP 或 LAMP 环境
-
-# 2. 配置 Nginx（示例）
-server {
-    listen 666;
-    server_name your_domain.com;
-    root /var/www/sport-xiaomi;
-    index index.php;
-    
-    location ~ \.php$ {
-        fastcgi_pass unix:/var/run/php/php7.4-fpm.sock;
-        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
-        include fastcgi_params;
-    }
-}
-
-# 3. 设置目录权限
-chmod 755 /var/www/sport-xiaomi
-chmod 777 /var/www/sport-xiaomi/cache  # 缓存目录需要写权限
-
-# 4. 重启 Nginx
-sudo systemctl restart nginx
+# 上传项目到服务器后:
+chmod 777 cache/
+nohup php -S 0.0.0.0:666 > php666.log 2>&1 &
+# 或使用 Nginx/Apache 指向项目目录, 入口为 index.php
 ```
 
----
+### Vercel 部署
 
-## 📱 使用说明
+1. 在 [Vercel](https://vercel.com) 导入仓库 `1837620622/sport-xiaomi`
+2. 直接 Deploy, 运行时已由 `vercel.json` 配置 (vercel-php@0.7.1)
+3. 部署完成后访问: https://sport-xiaomi.vercel.app
 
-### 网页界面使用
-
-1. 访问工具主页（如 `http://localhost:8080`）
-2. 输入 Zepp 账号（手机号或邮箱）
-3. 输入账号密码
-4. 输入需要修改的步数
-5. 点击「立即提交」按钮
-6. 等待返回结果
-
-### 第三方平台绑定
-
-在使用本工具之前，需要完成以下步骤：
-
-1. **下载小米运动 APP**（或 Zepp Life）
-2. **注册并登录**账号
-3. **绑定第三方平台**：
-   - 微信运动
-   - 支付宝运动
-   - QQ 运动
-   - 新浪微博
-   - 阿里体育
-4. 绑定成功后可卸载 APP，使用本工具修改步数会自动同步
+> 注意: Vercel 无服务器环境下 `cache/` 目录不可写, 登录 Token 无法持久缓存, 每次请求会重新登录, 并受限于无服务器函数超时。完整功能建议使用独立服务器部署。
 
 ---
 
-## 🔌 API 接口文档
+## 使用说明
 
-### 接口基本信息
+### 网页界面
+
+1. 打开首页, 输入 Zepp 账号(手机号或邮箱)与密码
+2. 输入目标步数, 或点击"随机" / 快捷按钮 (10K~88K)
+3. 点击"提交同步", 在右侧终端查看实时执行日志
+
+### 第三方平台绑定 (重要)
+
+1. 下载 **Zepp Life**(原小米运动)APP
+2. 注册并登录账号
+3. 在"我的 > 第三方接入"中绑定: 微信运动、支付宝运动、QQ 运动等
+4. 绑定完成后即可通过本工具同步步数
+
+---
+
+## HTTP API 文档
+
+完整文档见在线 [API 文档页](http://118.195.148.242:666/docs/)。
+
+### 基本信息
 
 | 项目 | 内容 |
 |------|------|
-| **接口地址** | `http://你的域名/index.php` |
-| **请求方式** | GET / POST |
-| **返回格式** | JSON |
+| 接口地址 | `http://你的域名/index.php` |
+| 请求方式 | GET / POST |
+| 返回格式 | JSON (`application/json; charset=utf-8`) |
+| 频率限制 | 同一 IP 每分钟 10 次 |
 
 ### 请求参数
 
-| 参数名 | 类型 | 必填 | 说明 |
-|--------|------|------|------|
-| `user` | string | ✅ | 账号（手机号或邮箱） |
-| `pwd` | string | ✅ | 登录密码 |
-| `step` | int | ✅ | 需要修改的步数 |
-| `token` | string | ✅(API) | API 密钥，固定值：`666` |
-
-> **注意**：网页提交时无需 `token` 参数，仅 API 调用时需要
+| 参数 | 必填 | 说明 |
+|------|------|------|
+| `user` | 是 | Zepp 账号 (手机号或邮箱) |
+| `pwd` | 是 | 登录密码 |
+| `step` | 是 | 目标步数 (1~98800) 或 `随机数` (自动生成 18000~30000) |
+| `token` | 是* | API 密钥, 固定值 `666` (GET 必填, 网页表单 POST 可省略) |
 
 ### GET 请求示例
 
 ```bash
-curl "http://localhost:666/index.php?user=13888888888&pwd=yourpassword&step=20000&token=666"
+# 固定步数
+curl "http://your.domain/index.php?user=13888888888&pwd=yourpassword&step=28000&token=666"
+
+# 随机步数 (18000~30000)
+curl "http://your.domain/index.php?user=you@example.com&pwd=yourpassword&step=随机数&token=666"
 ```
 
 ### POST 请求示例
 
 ```bash
-curl -X POST "http://localhost:666/index.php" \
-  -d "user=13888888888" \
+curl -X POST "http://your.domain/index.php" \
+  -d "user=you@example.com" \
   -d "pwd=yourpassword" \
-  -d "step=20000"
+  -d "step=28000"
 ```
 
-### 返回结果示例
+### 返回结果
 
-**成功响应：**
 ```json
 {
-    "time": "2025-01-01 12:00:00",
+    "time": "2026-08-02 21:00:00",
     "user": "138****8888",
-    "step": 20000,
+    "step": 28000,
     "status": "success",
-    "message": "修改步数（20000）"
+    "message": "修改步数(28000)"
 }
 ```
 
-**失败响应：**
-```json
-{
-    "time": "2025-01-01 12:00:00",
-    "user": "138****8888",
-    "step": 20000,
-    "status": "failed",
-    "message": "账号或密码错误！"
-}
-```
+| 字段 | 说明 |
+|------|------|
+| `time` | 提交时间 (北京时间) |
+| `user` | 脱敏后的账号 |
+| `step` | 实际提交的步数 (随机模式返回生成值) |
+| `status` | `success` 或 `failed` |
+| `message` | 详细提示信息 |
 
 ---
 
-## 📁 项目结构
+## 项目结构
 
 ```
 sport-xiaomi/
-├── index.php          # 主程序文件（包含前端界面和后端逻辑）
-├── cache/             # Token 缓存目录（运行时自动创建）
-│   └── *.txt          # 用户登录 Token 缓存文件
-└── README.md          # 项目说明文档
+├── index.php          # 主程序 (前端界面 + API 后端逻辑)
+├── api/
+│   └── index.php      # Vercel 函数入口 (与 index.php 同源)
+├── docs/
+│   └── index.html     # 独立 API 文档页 (静态, 自动检测接口地址)
+├── cache/             # Token 缓存 / 频率限制 (运行时自动创建)
+├── vercel.json        # Vercel 部署配置
+├── .gitignore
+└── README.md
 ```
 
 ---
 
-## 🔒 安全说明
+## 技术原理
 
-1. **密码安全**：本工具不存储用户密码，仅在请求时临时使用
-2. **Token 缓存**：登录成功后仅缓存 Token，有效期 7 天
-3. **账号脱敏**：日志和返回结果中的账号均做脱敏处理
-4. **路径安全**：采用安全文件名过滤，防止目录遍历攻击
-5. **并发安全**：使用文件锁机制，防止并发写入导致数据损坏
+```
+浏览器/API 请求
+      │
+      ▼
+index.php ──► 参数校验 + 频率限制
+      │
+      ▼
+MiMotionRunner ──► 读取 7 天 Token 缓存 ──(未命中)──► Zepp 登录
+      │                                                    │
+      │                                              api-user.zepp.com (加密令牌)
+      │                                              account.zepp.com (登录)
+      │                                                    │
+      └────────► api-mifit-cn.zepp.com (提交步数数据) ◄──────┘
+```
 
----
-
-## ❓ 常见问题
-
-### Q: 提交成功但第三方平台未同步？
-
-A: 请尝试以下操作：
-1. 在小米运动 APP 中解绑第三方平台
-2. 重新绑定第三方平台
-3. 等待几分钟后查看
-
-### Q: 提示「账号或密码错误」？
-
-A: 请确认：
-1. 使用的是小米运动（Zepp Life）账号
-2. 账号和密码正确无误
-3. 账号未被封禁
-
-### Q: 为什么不建议使用特殊步数？
-
-A: 如 66666、88888 等整数步数可能因过于规律被系统检测或被他人举报，导致数据无法同步。建议使用随机步数。
-
-### Q: 缓存文件在哪里？
-
-A: 缓存文件存储在 `cache/` 目录下，以用户名命名，格式为 JSON。如需清除缓存，可直接删除对应文件。
+- 登录凭据使用 AES-128-CBC 加密传输
+- Token 缓存 7 天, 期间免重复登录
+- 请求头模拟 MiFit 6.14.0 Android 客户端
 
 ---
 
-## 📝 更新日志
+## 常见问题
 
-### V2.1 (2025-12)
-- 🔒 新增请求频率限制（每分钟最多10次）
-- 🔒 新增步数范围验证（1-98800）
-- 🔧 修复邮箱账号判断逻辑 bug
-- 🔧 优化错误信息传递机制
-- 🔧 增加 cURL 总超时时间限制
-- 🔧 移除代码中的敏感信息
+**Q: 提交成功但第三方平台未同步?**
+A: 在 Zepp Life APP 中解绑后重新绑定第三方平台, 等待几分钟查看。
 
-### V2.0 (2025-01)
-- 🆕 升级至最新 Zepp API 接口
-- 🆕 新增 7 天登录缓存机制
-- 🆕 全新响应式 UI 设计
-- 🆕 新增 API 文档页面
-- 🔧 优化并发安全处理
-- 🔧 增强错误提示信息
+**Q: 提示"账号或密码错误"?**
+A: 确认使用的是 Zepp Life / 小米运动账号 (非小米账号), 且密码正确。缓存清除后需重新登录。
 
-### V1.0 (2024)
-- 🎉 初始版本发布
-- ✅ 支持手机号/邮箱登录
-- ✅ 支持步数修改
-- ✅ 支持第三方平台同步
+**Q: 为什么不建议使用 66666 / 88888 等特殊步数?**
+A: 过于规律的整数步数可能被系统判定异常。建议使用"随机数"模式。
+
+**Q: 缓存文件在哪里?**
+A: `cache/` 目录下以用户名命名的 JSON 文件。删除即可强制重新登录。
 
 ---
 
-## 👨‍💻 作者信息
+## 更新日志
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Author-传康KK-blueviolet?style=for-the-badge" alt="Author">
-</p>
+### V3.0
+- 全新运动竞速风格界面 (Awwwards 级排版, 深/浅双主题)
+- API 文档独立成页 `docs/index.html`, 自动检测接口地址
+- 新增轻量 `?m=ping` 自检接口 (不触发登录、不消耗限频)
+- 记分牌数字滚动动画, 终端实时日志优化
+- 修复 favicon 404、lucide 图标兼容问题
+
+### V2.1
+- 新增请求频率限制 (每分钟 10 次)
+- 新增步数范围验证 (1~98800)
+- 修复邮箱账号判断逻辑 bug
+
+### V2.0
+- 升级至 Zepp API 接口
+- 新增 7 天登录缓存
+- 全新 UI 设计
+
+---
+
+## 作者信息
 
 | 联系方式 | 信息 |
 |----------|------|
-| **微信** | 1837620622（传康kk） |
-| **邮箱** | 2040168455@qq.com |
-| **咸鱼** | 万能程序员 |
-| **B站** | 万能程序员 |
+| 微信 | 1837620622 (传康Kk) |
+| 邮箱 | 2040168455@qq.com |
+| 咸鱼 | 万能程序员 |
+| B站 | 万能程序员 |
 
 ---
 
-## ⭐ Star History
+## 开源协议
 
-如果这个项目对你有帮助，请给一个 Star ⭐ 支持一下！
+本项目采用 [MIT License](https://opensource.org/licenses/MIT)。
 
----
-
-## 📄 开源协议
-
-本项目采用 [MIT License](https://opensource.org/licenses/MIT) 开源协议。
-
-```
-MIT License
-
-Copyright (c) 2025 传康KK
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-```
-
----
-
-<p align="center">
-  <strong>💡 生命在于运动，可别忘了出门锻炼哦！</strong>
-</p>
-
-<p align="center">
-  Made with ❤️ by 传康优创互联网科技
-</p>
+生命在于运动, 可别忘了出门锻炼哦!

@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="STEP.ENGINE API 文档 - 小米运动 Zepp Life 步数同步接口">
+<title>API 文档 - STEP.ENGINE</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23ff4d00'/%3E%3Cpath d='M8 21h3l2-8 4 13 3-11 1 6h3' fill='none' stroke='%23fff' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700;800&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lucide@latest"></script>
+<style>
+:root {
+    --bg: #f6f5f1; --bg-2: #eeede8; --fg: #101010; --muted: #6f6e67;
+    --line: rgba(16,16,16,0.12); --card: #fcfbf8;
+    --accent: #ff4d00; --accent-ink: #ffffff;
+    --ok: #1a9c5c; --err: #d92d20; --warn: #b45309;
+    --grid: rgba(16,16,16,0.05);
+    --code-bg: #101010; --code-fg: #e8e6df;
+    --shadow: 0 1px 2px rgba(0,0,0,0.05), 0 12px 32px -20px rgba(0,0,0,0.16);
+}
+[data-theme="dark"] {
+    --bg: #0b0b0a; --bg-2: #121210; --fg: #f2f1ec; --muted: #8f8e86;
+    --line: rgba(242,241,236,0.13); --card: #141412;
+    --accent: #ff5a1f; --accent-ink: #0b0b0a;
+    --ok: #34d399; --err: #f87171; --warn: #fbbf24;
+    --grid: rgba(242,241,236,0.045);
+    --code-bg: #000000; --code-fg: #e8e6df; --shadow: none;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background-color: var(--bg);
+    background-image:
+        linear-gradient(var(--grid) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 72px 72px;
+    color: var(--fg);
+    font-family: 'Space Grotesk', 'PingFang SC', sans-serif;
+    min-height: 100vh;
+    transition: background .35s, color .35s;
+}
+::selection { background: var(--accent); color: var(--accent-ink); }
+a { text-decoration: none; color: inherit; }
+
+.topbar {
+    position: sticky; top: 0; z-index: 50;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px clamp(20px, 5vw, 64px);
+    background: color-mix(in srgb, var(--bg) 86%, transparent);
+    backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-mark {
+    width: 36px; height: 36px; border-radius: 8px;
+    background: var(--accent); color: var(--accent-ink);
+    display: grid; place-items: center;
+    font-family: 'JetBrains Mono'; font-weight: 800; font-size: 16px;
+}
+.brand-name { font-weight: 700; font-size: 16px; letter-spacing: -0.02em; }
+.brand-sub { font-size: 10px; color: var(--muted); letter-spacing: 0.14em; text-transform: uppercase; margin-top: 2px; font-family: 'JetBrains Mono'; }
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.icon-btn {
+    width: 38px; height: 38px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card);
+    color: var(--fg); display: inline-grid; place-items: center;
+    cursor: pointer; transition: all .2s ease;
+}
+.icon-btn:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-1px); }
+.top-link {
+    display: inline-flex; align-items: center; gap: 7px;
+    padding: 9px 14px; border-radius: 8px;
+    border: 1px solid var(--line); background: var(--card);
+    font-size: 13px; font-weight: 600; cursor: pointer; transition: all .2s ease;
+}
+.top-link:hover { border-color: var(--accent); color: var(--accent); }
+
+.wrap { max-width: 1080px; margin: 0 auto; padding: clamp(48px, 6vw, 88px) clamp(20px, 5vw, 64px) 100px; }
+.wrap h1 { font-size: clamp(40px, 5.5vw, 72px); letter-spacing: -0.045em; line-height: 1; }
+.wrap h1 em { font-style: normal; color: var(--accent); }
+.wrap .sub { color: var(--muted); margin-top: 18px; margin-bottom: 48px; font-size: 14px; font-family: 'JetBrains Mono'; }
+
+.doc-card {
+    border: 1px solid var(--line);
+    background: var(--card);
+    box-shadow: var(--shadow);
+    margin-bottom: 22px;
+}
+.doc-head {
+    display: flex; align-items: center; gap: 12px;
+    padding: 16px 22px; border-bottom: 1px solid var(--line);
+    font-size: 15px; font-weight: 600;
+}
+.doc-head .pn {
+    font-family: 'JetBrains Mono'; font-size: 11px; font-weight: 700;
+    color: var(--accent); letter-spacing: 0.14em;
+    border: 1px solid var(--line); padding: 3px 8px;
+}
+.doc-head .ic { color: var(--accent); }
+.doc-body { padding: clamp(20px, 3vw, 32px); }
+
+.code-block {
+    background: var(--code-bg); color: var(--code-fg);
+    padding: 20px 22px;
+    font-family: 'JetBrains Mono'; font-size: 13px;
+    overflow-x: auto; margin: 12px 0 4px; line-height: 1.9;
+    border-radius: 8px;
+}
+.code-block .cm { color: #6b6a64; }
+.code-block .cc { color: #ff5a1f; }
+.code-block .ok- { color: #34d399; }
+.code-block .err- { color: #f87171; }
+
+.param-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.param-table th {
+    text-align: left; padding: 10px 12px; font-size: 11px;
+    letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--muted); border-bottom: 1px solid var(--line);
+    font-family: 'JetBrains Mono';
+}
+.param-table td { padding: 12px; border-bottom: 1px solid var(--line); color: var(--fg); line-height: 1.6; }
+.param-table tr:last-child td { border-bottom: none; }
+.param-table code {
+    font-family: 'JetBrains Mono'; font-size: 12.5px;
+    background: var(--bg-2); padding: 2px 8px; border-radius: 5px;
+}
+.param-table .req { color: var(--accent); font-size: 12px; font-weight: 700; }
+.badge {
+    display: inline-block; padding: 4px 12px; font-size: 11.5px; font-weight: 700;
+    font-family: 'JetBrains Mono'; border-radius: 4px;
+}
+.badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); border: 1px solid color-mix(in srgb, var(--ok) 35%, transparent); }
+.badge.err { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); border: 1px solid color-mix(in srgb, var(--err) 35%, transparent); }
+.badge.warn { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); }
+
+.footer {
+    border-top: 1px solid var(--line);
+    padding: 28px clamp(20px, 5vw, 64px);
+    display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 14px;
+    color: var(--muted); font-family: 'JetBrains Mono'; font-size: 12px;
+}
+.footer a { color: var(--muted); }
+.footer a:hover { color: var(--accent); }
+.footer .fl a { margin-left: 18px; }
+
+.copy-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    margin-top: 10px; padding: 7px 14px;
+    border: 1px solid var(--line); border-radius: 6px;
+    background: var(--bg); color: var(--muted);
+    font-family: 'JetBrains Mono'; font-size: 12px; cursor: pointer;
+    transition: all .2s;
+}
+.copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+.copy-btn.copied { border-color: var(--ok); color: var(--ok); }
+
+@media (max-width: 700px) {
+    .wrap h1 { font-size: 44px; }
+    .brand-sub { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="topbar">
+    <a class="brand" href="../">
+        <span class="brand-mark">S</span>
+        <span>
+            <span class="brand-name">STEP.ENGINE</span>
+            <div class="brand-sub">API Documentation</div>
+        </span>
+    </a>
+    <div class="top-actions">
+        <a class="top-link" href="https://github.com/1837620622/sport-xiaomi" target="_blank" rel="noopener"><i data-lucide="external-link" style="width:15px;height:15px"></i> GitHub</a>
+        <button class="icon-btn" id="themeBtn" title="切换主题" onclick="toggleTheme()"><i data-lucide="moon" style="width:17px;height:17px"></i></button>
+    </div>
+</div>
+
+<div class="wrap">
+    <h1>API <em>文档</em></h1>
+    <p class="sub" id="baseShow">GET / POST 均支持 · step 支持数字或"随机数" · 返回 JSON</p>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">01</span><span class="ic"><i data-lucide="info" style="width:16px;height:16px"></i></span> 基本信息</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>项目</th><th>内容</th></tr>
+                <tr><td>接口地址</td><td><code id="apiBase">(自动检测)</code></td></tr>
+                <tr><td>请求方式</td><td><span class="badge ok">GET</span> <span class="badge ok">POST</span></td></tr>
+                <tr><td>内容类型</td><td><code>application/x-www-form-urlencoded</code></td></tr>
+                <tr><td>返回格式</td><td><code>application/json; charset=utf-8</code></td></tr>
+                <tr><td>频率限制</td><td>同一 IP 每分钟最多 <b>10</b> 次</td></tr>
+                <tr><td>版本</td><td>V3.0 · Zepp API</td></tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">02</span><span class="ic"><i data-lucide="list" style="width:16px;height:16px"></i></span> 请求参数</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>参数</th><th>必填</th><th>说明</th></tr>
+                <tr><td><code>user</code></td><td><span class="req">是</span></td><td>Zepp 账号(手机号或邮箱)</td></tr>
+                <tr><td><code>pwd</code></td><td><span class="req">是</span></td><td>登录密码</td></tr>
+                <tr><td><code>step</code></td><td><span class="req">是</span></td><td>目标步数(1~98800)或"随机数"(自动生成 18000~30000)</td></tr>
+                <tr><td><code>token</code></td><td><span class="req">是</span></td><td>API 密钥, 固定值 <code>666</code> (GET 请求必填, 网页表单 POST 可省略)</td></tr>
+            </table>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">03</span><span class="ic"><i data-lucide="terminal" style="width:16px;height:16px"></i></span> 请求示例</div>
+        <div class="doc-body">
+            <div class="code-block" id="code1"><span class="cm"># GET · 固定步数</span><br><span class="cc">$</span> curl "{API}?user=13888888888&pwd=yourpassword&step=28000&token=666"</div>
+            <button class="copy-btn" data-target="code1"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code2"><span class="cm"># GET · 随机步数(18000~30000)</span><br><span class="cc">$</span> curl "{API}?user=you@example.com&pwd=yourpassword&step=随机数&token=666"</div>
+            <button class="copy-btn" data-target="code2"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code3"><span class="cm"># POST · 网页表单提交(无需 token)</span><br><span class="cc">$</span> curl -X POST "{API}" -d "user=you@example.com&pwd=yourpassword&step=28000"</div>
+            <button class="copy-btn" data-target="code3"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">04</span><span class="ic"><i data-lucide="braces" style="width:16px;height:16px"></i></span> 返回结果</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><th>字段</th><th>说明</th></tr>
+                <tr><td><code>time</code></td><td>提交时间(北京时间)</td></tr>
+                <tr><td><code>user</code></td><td>脱敏后的账号</td></tr>
+                <tr><td><code>step</code></td><td>实际提交的步数(随机模式返回生成值)</td></tr>
+                <tr><td><code>status</code></td><td><span class="badge ok">success</span> 或 <span class="badge err">failed</span></td></tr>
+                <tr><td><code>message</code></td><td>详细提示信息</td></tr>
+            </table>
+            <div class="code-block" id="code4"><span class="cm"># 成功响应</span><br>{<br>&nbsp;&nbsp;"time": "2026-08-02 21:00:00",<br>&nbsp;&nbsp;"user": "138****8888",<br>&nbsp;&nbsp;"step": 28000,<br>&nbsp;&nbsp;<span class="ok-">"status": "success"</span>,<br>&nbsp;&nbsp;"message": "修改步数(28000)"<br>}</div>
+            <button class="copy-btn" data-target="code4"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+            <div class="code-block" id="code5"><span class="cm"># 失败响应</span><br>{<br>&nbsp;&nbsp;"time": "2026-08-02 21:00:05",<br>&nbsp;&nbsp;"user": "138****8888",<br>&nbsp;&nbsp;"step": 28000,<br>&nbsp;&nbsp;<span class="err-">"status": "failed"</span>,<br>&nbsp;&nbsp;"message": "登录失败: 账号或密码错误!"<br>}</div>
+            <button class="copy-btn" data-target="code5"><i data-lucide="copy" style="width:13px;height:13px"></i> 复制</button>
+        </div>
+    </div>
+
+    <div class="doc-card">
+        <div class="doc-head"><span class="pn">05</span><span class="ic"><i data-lucide="alert-triangle" style="width:16px;height:16px"></i></span> 注意事项</div>
+        <div class="doc-body">
+            <table class="param-table">
+                <tr><td>1</td><td>账号为 <b>Zepp Life / 小米运动</b> 账号, 不是小米账号</td></tr>
+                <tr><td>2</td><td>需要先在 Zepp Life 中绑定微信 / 支付宝等第三方平台</td></tr>
+                <tr><td>3</td><td>不建议使用 66666 / 88888 等特殊步数, 可能被判定异常</td></tr>
+                <tr><td>4</td><td>登录信息缓存 7 天, 同一账号无需重复登录</td></tr>
+                <tr><td>5</td><td>本工具仅供个人学习研究, 请勿商用</td></tr>
+            </table>
+        </div>
+    </div>
+</div>
+
+<footer class="footer">
+    <span>© 传康KK · STEP.ENGINE</span>
+    <div class="fl">
+        <a href="../">返回首页</a>
+        <a href="https://github.com/1837620622/sport-xiaomi" target="_blank" rel="noopener">GitHub</a>
+    </div>
+</footer>
+
+<script>
+lucide.createIcons();
+
+/* 主题切换 */
+(function () {
+    const saved = localStorage.getItem('step-theme');
+    const prefers = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    document.documentElement.dataset.theme = saved || prefers;
+    syncThemeIcon();
+})();
+function toggleTheme() {
+    const cur = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = cur;
+    localStorage.setItem('step-theme', cur);
+    syncThemeIcon();
+}
+function syncThemeIcon() {
+    const dark = document.documentElement.dataset.theme === 'dark';
+    const ic = document.querySelector('#themeBtn i');
+    if (ic) { ic.setAttribute('data-lucide', dark ? 'sun' : 'moon'); lucide.createIcons(); }
+}
+
+/* 动态检测 API 地址: Vercel 上走 /api/index.php, 服务器上走 /index.php */
+(function () {
+    var apiBase;
+    if (location.hostname.indexOf('vercel.app') !== -1) {
+        apiBase = location.origin + '/api/index.php';
+    } else {
+        apiBase = location.origin + '/index.php';
+    }
+    document.getElementById('apiBase').textContent = apiBase;
+    document.getElementById('baseShow').textContent =
+        '接口地址: ' + apiBase + ' · GET / POST 均支持 · step 支持数字或"随机数"';
+    var blocks = document.querySelectorAll('.code-block');
+    blocks.forEach(function (b) {
+        b.innerHTML = b.innerHTML.split('{API}').join(apiBase);
+    });
+})();
+
+/* 复制代码 */
+document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        var block = document.getElementById(this.dataset.target);
+        var text = block.textContent.replace(/^# [^\n]*\n\$ /m, '').trim();
+        var origin = this.querySelector('i');
+        navigator.clipboard.writeText(text).then(function () {
+            this.classList.add('copied');
+            origin.setAttribute('data-lucide', 'check');
+            lucide.createIcons();
+            setTimeout(function () {
+                this.classList.remove('copied');
+                origin.setAttribute('data-lucide', 'copy');
+                lucide.createIcons();
+            }.bind(this), 1600);
+        }.bind(this));
+    });
+});
+</script>
+</body>
+</html>
