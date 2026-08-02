@@ -343,7 +343,11 @@ $json = '[{"data_hr":"\/\/\/\/\/\/9L\/\/\/\/\/\/\/\/\/\/\/\/Vv\/\/\/\/\/\/\/\/\/
 function showWebPage() {
     $self = htmlspecialchars($_SERVER['PHP_SELF'] ?? '/');
     $host = $_SERVER['HTTP_HOST'] ?? 'localhost';
-    $scheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+    // 兼容反向代理(如 Vercel)下 HTTPS 由代理终结的情况
+    $isHttps = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+        || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https')
+        || (isset($_SERVER['SERVER_PORT']) && $_SERVER['SERVER_PORT'] == 443);
+    $scheme = $isHttps ? 'https' : 'http';
     $base = $scheme . '://' . $host . $self;
 ?>
 <!DOCTYPE html>
